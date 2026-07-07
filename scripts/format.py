@@ -1318,31 +1318,31 @@ def _apply_font_to_runs(para, cn_font, en_font, size):
 
 def format_title(para):
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_spacing(para)
+    _set_spacing(para, space_after=LINE_SPACING)  # 大标题下方空 1 行
     _apply_font_to_runs(para, FONT_TITLE, FONT_EN, SIZE_TITLE)
 
 
 def format_h1(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
+    _set_spacing(para)
     _apply_font_to_runs(para, FONT_CHAPTER, FONT_EN, SIZE_CHAPTER)
 
 
 def format_h2(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
+    _set_spacing(para)
     _apply_font_to_runs(para, FONT_SECTION, FONT_EN, SIZE_SECTION)
 
 
 def format_h3(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
+    _set_spacing(para)
     _apply_font_to_runs(para, FONT_SUBSECTION, FONT_EN, SIZE_SUBSECTION)
 
 
 def format_h4(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para, space_after=LINE_SPACING)
+    _set_spacing(para)
     para.paragraph_format.first_line_indent = Pt(int(SIZE_BODY.pt * BODY_INDENT_CHARS))
     _apply_font_to_runs(para, FONT_ITEM, FONT_EN, SIZE_ITEM)
 
