@@ -27,22 +27,50 @@
 
 ---
 
-## ? 快速开始
+## 快速开始
 
-```bash
-# 第一步：分析文档（不改文件，只出报告）
-python scripts/format.py --analyze 报告.docx
+安装完成后，在 WorkBuddy 中有两种调用方式：
 
-# 第二步：查看 JSON 报告，确认每段识别是否正确
-# 如果有需要调整的段落，准备一个 overrides.json
+**方式一：斜杠命令（最直接）**
 
-# 第三步：应用排版
-python scripts/format.py --apply 报告.docx
-
-# 输出：报告+docx-helper+v1.docx
+```
+/docx-helper 检查这份文档的格式
 ```
 
-三步走完，一份规范排版的公文就出来了。
+Skill 立即启动，开始分析诊断。精准、零歧义。
+
+**方式二：自然语言**
+
+把 `.docx` 文件拖进对话框，直接说：
+
+> 帮我把这份报告排版
+
+AI 会自动读取文档，逐段分析标题层级、字体、编号，然后把诊断结果一条条列出来：
+
+> "第 0 段识别为大标题，将设为方正小标宋二号居中；第 3 段识别为一级标题'一、项目背景'，将设为黑体三号；第 5 段使用了 '●' 符号，参考 GB/T 9704-2012 建议改为'（一）'……"
+
+你只需要回复确认或调整：
+
+> "第 5 段的 ● 不用改，其他没问题"
+
+几秒钟后，`报告+docx-helper+v1.docx` 就出来了。全程没打开过 Word。
+
+### 也支持命令行
+
+如果你习惯终端操作：
+
+```bash
+# 分析诊断：输出 JSON 差分报告
+python scripts/format.py --analyze 报告.docx
+
+# 应用排版：自动分配版本号
+python scripts/format.py --apply 报告.docx
+
+# 带覆盖规则
+python scripts/format.py --apply 报告.docx --overrides overrides.json
+```
+
+两种方式底层是同一套引擎，选你喜欢的。
 
 ---
 
@@ -173,13 +201,13 @@ v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
 
 ## ? JSON 分析报告说明
 
-运行 `--analyze` 后输出的 JSON 报告包含以下字段：
+在 AI 客户端中，分析结果会以自然语言直接在对话框里展示，你不需要关心 JSON 长什么样。以下是底层报告的各字段说明，供命令行用户参考：
 
 | 字段 | 说明 |
 |------|------|
 | `page_changes` | 页面边距变更对比（当前值 → 目标值） |
 | `cover_detection` | 封面检测结果（标题/副标题/单位/日期各元素识别） |
-| `numbering_analysis` | 编号层级分析（文档实际编号 vs 国标要求，含不合规项修改建议） |
+| `numbering_analysis` | 编号层级分析（文档实际编号 vs 参考标准，含修改建议） |
 | `paragraph_classifications` | 逐段识别结果（类型、置信度、当前格式 → 目标格式） |
 | `color_warnings` | 非黑色文字警告 |
 | `bold_warnings` | 将移除的加粗警告 |
@@ -208,9 +236,9 @@ A: 系统未安装方正字库。请按上方"安装"章节中的字体安装说
 
 A: 不能。请先在 Word 中打开 `.doc` 文件，另存为 `.docx` 格式。
 
-**Q: 脚本把我的标题识别错了怎么办？**
+**Q: AI 把某段标题识别错了怎么办？**
 
-A: 用覆盖规则。准备一个 `overrides.json`，指定某段的手动类型，然后 `--apply` 时带上 `--overrides`。
+A: 分析报告出来后，直接在对话框说"第 N 段不是标题，改成正文"，AI 会记住并应用调整。命令行用户可以用 `overrides.json`。
 
 **Q: 排版后表格里的格式被改了？**
 
