@@ -613,6 +613,7 @@ def reset_format(input_path, output_path):
         pf.space_before = Pt(0)
         pf.space_after = Pt(0)
         pf.line_spacing = None
+        pf.left_indent = Pt(0)
         pf.first_line_indent = Pt(0)
         pf.page_break_before = False
         _strip_numpr(para)
