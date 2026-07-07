@@ -108,6 +108,40 @@ v3: ...
 
 每次都基于同一份 reset 文档继续调整，链式追溯，随时可回退到任意版本。
 
+## 自定义配置
+
+可通过 `.docx-helper.json` 覆盖任意排版参数（不改的部分自动沿用 GB 默认）：
+
+```bash
+# CLI 指定
+python scripts/format.py --apply 报告+reset.docx --structure structure.json --config .docx-helper.json
+
+# 自动查找（按优先级）
+# 1. --config 参数显式指定
+# 2. 当前目录 .docx-helper.json
+# 3. ~/.workbuddy/docx-helper.json
+# 4. 以上都没有 → 使用默认 GB-9704 配置
+```
+
+配置示例（只改想改的，其余继承默认）：
+
+```json
+{
+  "fonts": {
+    "section": "思源宋体",
+    "body": "思源宋体"
+  },
+  "sizes": {
+    "body": 14
+  },
+  "spacing": {
+    "body_indent_chars": 2
+  }
+}
+```
+
+完整默认配置见项目根目录 `docx-helper-default.json`（即 `.docx-helper.json`）。
+
 ## 排版规则
 
 ### 优先顺序
