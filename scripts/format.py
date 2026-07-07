@@ -22,16 +22,19 @@
   - 第二次运行: 报告+docx-helper+v2.docx
   - 每次自动递增版本号，永不覆盖原文件或旧版本
 
-排版规则:
-  1. 页面: A4, 上 3.7 / 下 3.5 / 左 2.7 / 右 2.7 cm, 页脚距底边 2.54 cm
-  2. 字号映射: 二号=22pt, 三号=16pt, 四号=14pt
-  3. 大标题: 2号 方正小标宋_GBK, 居中, 不加粗
-  4. 一级标题: 3号 方正黑体_GBK, 不加粗 (匹配 "一、"/"二、" 等)
-  5. 二级标题: 3号 方正楷体_GBK, 不加粗 (匹配 "（一）"/"（二）" 等)
-  6. 三级标题: 3号 方正仿宋_GBK, 不加粗 (匹配 "1." / "1）" 等)
-  7. 四级标题: 3号 方正仿宋_GBK, 不加粗 (匹配 "(1)" / "①" 等)
-  8. 正文: 3号 方正仿宋_GBK, 西文/数字 Times New Roman, 行距 28.9 磅, 首行缩进 2 字
+排版规则（字体/字号/对齐）:
+  1. 页面: A4, 上 3.7 / 下 3.5 / 左 2.7 / 右 2.7 cm
+  2. title  (大标题):   2号 方正小标宋_GBK, 居中
+  3. h1     (章标题):   3号 方正黑体_GBK, 左对齐
+  4. h2     (节标题):   3号 方正楷体_GBK, 左对齐
+  5. h3     (子节标题): 3号 方正仿宋_GBK, 左对齐
+  6. h4     (条目编号): 3号 方正仿宋_GBK, 左对齐, 无缩进
+  7. bullet (项目符号): 3号 方正仿宋_GBK, 左对齐
+  8. body   (正文):     3号 方正仿宋_GBK, 首行缩进 2 字, 行距 28.9 磅
   9. 页码: 4号 Times New Roman, "— N —" 格式, 居中
+
+注意：标题层级判定应按语义深度（relative depth），而非按编号字符正则匹配。
+例：1.编制背景 和 2.1 盘点目标 同为「章的直接子级」→ 均判 h2（楷体）；4.1.1 按分层迁移 是「h2 的子级」→ 判 h3（仿宋）。
 
 字体依赖: 需安装方正小标宋/黑体/楷体/仿宋_GBK, 否则 Word 会提示字体缺失。
 """
@@ -286,6 +289,161 @@ def _clear_run_formatting(run):
         run.font.color.rgb = None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 自动编号 → 文字：reset 时把 Word 自动编号(numPr)烘焙成正文文本，
+# 否则删除 numPr 会把自动生成的序号（1. / 一、 / (1)）一起删掉，层级就丢了。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CN_NUM = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+_CIRCLED = {1: '①', 2: '②', 3: '③', 4: '④', 5: '⑤', 6: '⑥', 7: '⑦', 8: '⑧',
+            9: '⑨', 10: '⑩', 11: '⑪', 12: '⑫', 13: '⑬', 14: '⑭', 15: '⑮',
+            16: '⑯', 17: '⑰', 18: '⑱', 19: '⑲', 20: '⑳'}
+
+def _to_chinese(n):
+    if n <= 10:
+        return _CN_NUM[n]
+    if n < 20:
+        return '十' + (_CN_NUM[n - 10] if n > 10 else '')
+    if n < 100:
+        t, o = divmod(n, 10)
+        return _CN_NUM[t] + '十' + (_CN_NUM[o] if o else '')
+    return str(n)
+
+def _format_num(n, fmt):
+    if fmt in ('chineseCount', 'chineseNumber', 'ideographTraditional', 'ideographZodiac', 'chineseLegalSimplified'):
+        return _to_chinese(n)
+    if fmt in ('decimalEnclosedCircle', 'decimalEnclosedCircleChinese'):
+        return _CIRCLED.get(n, f'({n})')
+    if fmt == 'decimalFullWidth':
+        return ''.join(chr(ord('０') + int(c)) for c in str(n))
+    if fmt == 'decimalHalfWidth':
+        return ''.join(chr(ord(' ') + int(c)) for c in str(n))
+    # decimal / upperRoman / lowerRoman / upperLetter / lowerLetter / 其他 一律回退为阿拉伯数字
+    return str(n)
+
+def _iter_all_paragraphs(doc):
+    for p in doc.paragraphs:
+        yield p
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    yield p
+
+def _build_numbering_maps(doc):
+    """返回 (numId→abstractNumId, abstractNumId→{ilvl:信息})"""
+    try:
+        numbering_part = doc.part.numbering_part
+    except Exception:
+        return {}, {}
+    if numbering_part is None:
+        return {}, {}
+    root = numbering_part._element
+    num_to_abs = {}
+    lvl_info = {}
+    for num in root.findall(qn('w:num')):
+        nid = num.get(qn('w:numId'))
+        absn = num.find(qn('w:abstractNumId'))
+        if absn is not None:
+            num_to_abs[nid] = absn.get(qn('w:val'))
+    for absn in root.findall(qn('w:abstractNum')):
+        aid = absn.get(qn('w:abstractNumId'))
+        lvl_info[aid] = {}
+        for lvl in absn.findall(qn('w:lvl')):
+            ilvl = int(lvl.get(qn('w:ilvl')))
+            fmt = lvl.find(qn('w:numFmt'))
+            txt = lvl.find(qn('w:lvlText'))
+            start = lvl.find(qn('w:start'))
+            lvl_info[aid][ilvl] = {
+                'fmt': fmt.get(qn('w:val')) if fmt is not None else 'decimal',
+                'text': txt.get(qn('w:val')) if txt is not None else '%1.',
+                'start': int(start.get(qn('w:val'))) if start is not None else 1,
+            }
+    return num_to_abs, lvl_info
+
+def _compute_list_texts(doc):
+    """返回 {段落 lxml 元素: 计算出的编号文本}"""
+    num_to_abs, lvl_info = _build_numbering_maps(doc)
+    if not num_to_abs:
+        return {}
+    result = {}
+    counters = {}      # (numId, ilvl) -> 当前序号（嵌套/非十进制列表用各自计数器）
+    seq_decimal = 0    # 顶层十进制 "1." 标题的连续序号（跨独立列表顺次重排）
+    prev_meta = None   # (numId, ilvl, fmt) 上一个编号段落
+    for p in _iter_all_paragraphs(doc):
+        numPr = p._element.find(qn('w:pPr'))
+        np = numPr.find(qn('w:numPr')) if numPr is not None else None
+        if np is None:
+            # 非编号段落不重置计数器（正文夹在列表项中间时，编号应延续）
+            continue
+        numId = np.find(qn('w:numId'))
+        ilvl = np.find(qn('w:ilvl'))
+        if numId is None:
+            prev_meta = None
+            continue
+        nid = numId.get(qn('w:val'))
+        il = int(ilvl.get(qn('w:val')) if ilvl is not None else 0)
+        absid = num_to_abs.get(nid)
+        info = lvl_info.get(absid, {}).get(il) if absid is not None else None
+        if info is None:
+            prev_meta = (nid, il, '?')
+            continue
+        fmt = info['fmt']
+        lvltext = info['text']
+        # 顶层十进制 "1." / "1、" 标题：跨独立列表顺次重排（修复"每段都显示 1."的坏源）
+        is_top_decimal = (il == 0 and fmt == 'decimal' and re.match(r'^%1[.、]?$', lvltext))
+        if is_top_decimal:
+            cont = (prev_meta is not None and prev_meta[1] == 0 and prev_meta[2] == 'decimal'
+                    and _numid_gt(nid, prev_meta[0]))
+            seq_decimal = (seq_decimal + 1) if cont else info['start']
+            txt = re.sub(r'%1', _format_num(seq_decimal, fmt), lvltext)
+        else:
+            # 其余（嵌套、括号、(1)、项目符号等）用各自 (numId, ilvl) 计数器
+            if prev_meta is None or prev_meta[0] != nid:
+                for k in list(counters):
+                    if k[0] == nid:
+                        del counters[k]
+                counters[(nid, il)] = info['start']
+            else:
+                counters[(nid, il)] = counters.get((nid, il), info['start'] - 1) + 1
+            val = counters[(nid, il)]
+            txt = re.sub(r'%1', _format_num(val, fmt), lvltext)
+        if re.search(r'[.、）\)]$', txt):
+            txt += ' '
+        result[p._element] = txt
+        prev_meta = (nid, il, fmt)
+    return result
+
+
+def _numid_gt(a, b):
+    """numId 通常为创建顺序的整数，后建的列表 id 更大"""
+    try:
+        return int(a) > int(b)
+    except ValueError:
+        return a > b
+
+def _convert_list_numbers_to_text(doc):
+    """把自动编号烘焙为正文文本（在段首插入编号 run），并移除 numPr。"""
+    texts = _compute_list_texts(doc)
+    if not texts:
+        return
+    for p in _iter_all_paragraphs(doc):
+        el = p._element
+        if el not in texts:
+            continue
+        num_text = texts[el]
+        cur = p.text.strip()
+        if cur and cur.startswith(num_text.strip()):
+            _strip_numpr(p)
+            continue
+        run = p.add_run(num_text)
+        pPr = el.find(qn('w:pPr'))
+        if pPr is not None:
+            pPr.addnext(run._r)
+        else:
+            el.insert(0, run._r)
+        _strip_numpr(p)
+
 def reset_format(input_path, output_path):
     """彻底重置文档的所有手动格式，输出了一个中性文档。
 
@@ -301,6 +459,9 @@ def reset_format(input_path, output_path):
         normal_style = doc.styles['Normal']
     except KeyError:
         normal_style = None
+
+    # 先把自动编号转成文字（避免删除 numPr 时把序号一起删掉）
+    _convert_list_numbers_to_text(doc)
 
     def _reset_para(para):
         pf = para.paragraph_format
