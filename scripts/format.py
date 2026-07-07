@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-公文格式刷 — 对已有 .docx 文档分析并套用党政机关公文排版。
+文档排版助手 (docx-helper) — 对已有 .docx 文档套用规范排版。
 
-交互式工作流:
-  1. 分析模式: python format.py --analyze <input.docx>
-     → 输出 JSON 差分报告（不改任何文件），含：
-       - 页面变更、每段识别结果、字体颜色警告、编号层级分析
+推荐工作流（大模型驱动）:
+  0. 重置模式: python format.py --reset <input.docx>
+     → 彻底清空所有手动格式（字体/字号/颜色/加粗/缩进/自动编号），
+        输出 {原名}+reset.docx，得到一个"中性"文档，便于下一步判结构。
 
-  2. 应用模式: python format.py --apply <input.docx> [--version N]
-     → 按规则排版，输出到版本化文件: {原名}+gov-style+v{N}.docx
+  1. 大模型判结构: 阅读 reset 文档全文，决定每个段落的类型
+        （title/h1/h2/h3/h4/bullet/body），写入 structure.json:
+        {"paragraphs": {"1": "h2", "3": "h2", "5": "h4"}, "cover": false, "title_index": null}
 
-  3. 直接模式（兼容）: python format.py <input.docx>
+  2. 应用模式: python format.py --apply <reset.docx> --structure structure.json
+     → 按结构映射套用排版，输出版本化文件: {原名}+docx-helper+v{N}.docx
+
+  3. 直接模式（兼容，无 structure 时走启发式）: python format.py <input.docx>
      → 等同于 --apply（自动分配版本号）
 
 版本化命名:
-  - 第一次运行: 报告+gov-style+v1.docx
-  - 第二次运行: 报告+gov-style+v2.docx
+  - 第一次运行: 报告+docx-helper+v1.docx
+  - 第二次运行: 报告+docx-helper+v2.docx
   - 每次自动递增版本号，永不覆盖原文件或旧版本
 
 排版规则:
@@ -28,8 +32,6 @@
   7. 四级标题: 3号 方正仿宋_GBK, 不加粗 (匹配 "(1)" / "①" 等)
   8. 正文: 3号 方正仿宋_GBK, 西文/数字 Times New Roman, 行距 28.9 磅, 首行缩进 2 字
   9. 页码: 4号 Times New Roman, "— N —" 格式, 居中
-
-  10. 非黑色文字: 分析时标注警告, 应用时强制设为黑色（政府公文要求黑色）
 
 字体依赖: 需安装方正小标宋/黑体/楷体/仿宋_GBK, 否则 Word 会提示字体缺失。
 """
@@ -136,18 +138,18 @@ def _add_page_field(para):
 
 def _next_version(input_path):
     base = os.path.splitext(os.path.basename(input_path))[0]
-    m = re.match(r'^(.+?)\+gov-style\+v(\d+)$', base)
+    m = re.match(r'^(.+?)\+docx-helper\+v(\d+)$', base)
     if m:
         base = m.group(1)
     dirname = os.path.dirname(input_path) or '.'
-    pattern = os.path.join(dirname, f'{base}+gov-style+v*.docx')
+    pattern = os.path.join(dirname, f'{base}+docx-helper+v*.docx')
     existing = glob.glob(pattern)
     max_v = 0
     for f in existing:
-        m2 = re.search(r'\+gov-style\+v(\d+)\.docx$', f)
+        m2 = re.search(r'\+docx-helper\+v(\d+)\.docx$', f)
         if m2:
             max_v = max(max_v, int(m2.group(1)))
-    return base, max_v + 1, os.path.join(dirname, f'{base}+gov-style+v{max_v + 1}.docx')
+    return base, max_v + 1, os.path.join(dirname, f'{base}+docx-helper+v{max_v + 1}.docx')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,18 +257,79 @@ _TYPE_ALIAS = {
 
 def _resolve_type(ptype):
     return _TYPE_ALIAS.get(ptype, ptype)
-    """找到文档中第一个应该作为大标题的段落索引"""
-    for i, para in enumerate(paragraphs):
-        text = para.text.strip()
-        if not text:
-            continue
-        style = para.style.name if para.style else ''
-        if 'Title' in style or '标题' in style:
-            return i
-        if i <= 4 and len(text) <= 80:
-            return i
-        break
-    return -1
+
+
+def _strip_numpr(para):
+    """移除段落的自动编号（w:numPr），使编号数字由正文文本承载，避免数字与正文字体不一致。"""
+    pPr = para._element.find(qn('w:pPr'))
+    if pPr is not None:
+        numPr = pPr.find(qn('w:numPr'))
+        if numPr is not None:
+            pPr.remove(numPr)
+
+
+def _clear_run_formatting(run):
+    """清空 run 的全部手动格式（字体/字号/颜色/加粗/斜体/下划线/字距等），仅保留文字。"""
+    rPr = run._element.find(qn('w:rPr'))
+    if rPr is not None:
+        for tag in ('w:rFonts', 'w:b', 'w:i', 'w:color', 'w:sz', 'w:u',
+                    'w:highlight', 'w:spacing', 'w:w', 'w:shd', 'w:vertAlign',
+                    'w:rStyle', 'w:strike', 'w:emboss', 'w:imprint', 'w:outline',
+                    'w:dstrike', 'w:effect'):
+            for child in rPr.findall(qn(tag)):
+                rPr.remove(child)
+    run.font.size = None
+    run.bold = None
+    run.italic = None
+    run.underline = None
+    if run.font.color is not None:
+        run.font.color.rgb = None
+
+
+def reset_format(input_path, output_path):
+    """彻底重置文档的所有手动格式，输出了一个中性文档。
+
+    - 段落样式置为 Normal，清除对齐/间距/行距/缩进/分页符
+    - 移除自动编号 w:numPr（让编号数字回到正文文本里）
+    - 清空每个 run 的字体/字号/颜色/加粗等手动格式
+    - 表格内文字同样处理
+    不改变文字内容，不改变段落数量与顺序（便于按索引套用结构映射）。
+    """
+    doc = Document(input_path)
+    normal_style = None
+    try:
+        normal_style = doc.styles['Normal']
+    except KeyError:
+        normal_style = None
+
+    def _reset_para(para):
+        pf = para.paragraph_format
+        pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        pf.line_spacing = None
+        pf.first_line_indent = Pt(0)
+        pf.page_break_before = False
+        _strip_numpr(para)
+        if normal_style is not None:
+            try:
+                para.style = normal_style
+            except Exception:
+                pass
+        for r in para.runs:
+            _clear_run_formatting(r)
+
+    for para in doc.paragraphs:
+        _reset_para(para)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _reset_para(para)
+
+    doc.save(output_path)
+    return output_path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -986,7 +1049,7 @@ _FORMATTERS = {
 }
 
 
-def apply_format(input_path, output_path, overrides=None):
+def apply_format(input_path, output_path, overrides=None, structure=None):
     doc = Document(input_path)
 
     # 页面
@@ -1000,19 +1063,31 @@ def apply_format(input_path, output_path, overrides=None):
         sec.page_height = Cm(29.7)
         _add_page_numbers(sec)
 
+    # 结构映射（来自大模型判定的 structure.json）
+    # structure: {"paragraphs": {idx: type}, "cover": bool|None, "title_index": int|None}
+    type_map = {}
+    if structure and isinstance(structure.get('paragraphs'), dict):
+        type_map = {int(k): v for k, v in structure['paragraphs'].items()}
+    cover_flag = structure.get('cover') if structure else None     # True/False/None
+    title_index = structure.get('title_index') if structure else None
+
+    # 兼容旧版 overrides（手动覆盖规则，优先级高于 structure）
     para_overrides = {}
     if overrides and 'paragraphs' in overrides:
         para_overrides = {int(k): v for k, v in overrides['paragraphs'].items()}
 
-    cover_overrides = overrides.get('cover') if overrides else None
     paragraphs = doc.paragraphs
 
     # ── 封面检测与排版 ──
-    cover_info = _detect_cover(paragraphs)
-    if cover_info and cover_overrides is not False:
-        _format_cover(doc, cover_info)
+    cover_info = None
+    if cover_flag is not False:
+        cover_info = _detect_cover(paragraphs)
+        if cover_info and cover_flag is not False:
+            _format_cover(doc, cover_info)
 
-    title_idx = _find_title_idx(paragraphs)
+    # 没有 structure 时，回退到启发式标题检测（兼容老流程）
+    if title_index is None and not type_map:
+        title_index = _find_title_idx(paragraphs)
 
     for i, para in enumerate(paragraphs):
         if not para.text.strip():
@@ -1025,13 +1100,18 @@ def apply_format(input_path, output_path, overrides=None):
                                 + cover_info.get('date_indices', [])):
             continue
 
+        # 类型判定优先级：overrides > structure 映射 > 启发式
         if i in para_overrides:
             ptype = para_overrides[i]
+        elif i in type_map:
+            ptype = type_map[i]
         else:
             ptype, _, _ = _classify(para)
+            if title_index is not None and i == title_index and ptype not in ('title', 'h1', 'h2', 'h3'):
+                ptype = 'title'
 
-        if i == title_idx and i not in para_overrides and ptype not in ('title', 'h1', 'h2', 'h3'):
-            ptype = 'title'
+        # 套用前强制清除自动编号，避免数字与正文字体不一致
+        _strip_numpr(para)
 
         formatter = _FORMATTERS.get(ptype, format_body)
         formatter(para)
@@ -1042,6 +1122,7 @@ def apply_format(input_path, output_path, overrides=None):
             for cell in row.cells:
                 for para in cell.paragraphs:
                     if para.text.strip():
+                        _strip_numpr(para)
                         format_body(para, indent=False)
 
     doc.save(output_path)
@@ -1055,13 +1136,16 @@ def apply_format(input_path, output_path, overrides=None):
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='公文格式刷')
+    parser = argparse.ArgumentParser(description='文档排版助手 docx-helper')
     parser.add_argument('input', nargs='?', help='输入 .docx 文件')
-    parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件')
+    parser.add_argument('--reset', action='store_true', help='重置模式：清空所有手动格式，输出 {原名}+reset.docx（中性文档，便于判结构）')
+    parser.add_argument('--list', action='store_true', help='列出文档所有非空段落的「索引: 文本」，用于判结构')
+    parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件（启发式，仅供参考）')
     parser.add_argument('--apply', action='store_true', help='应用模式：执行排版并输出版本化文件')
+    parser.add_argument('--structure', help='结构映射 JSON 文件路径（大模型判定的段落类型）')
     parser.add_argument('--version', type=int, help='指定版本号（默认自动递增）')
     parser.add_argument('--output', help='直接指定输出路径（跳过版本号逻辑）')
-    parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径')
+    parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径（旧版，优先级高于 structure）')
 
     args = parser.parse_args()
 
@@ -1073,6 +1157,22 @@ if __name__ == '__main__':
     if not os.path.exists(src):
         print(f'错误: 找不到 {src}')
         sys.exit(1)
+
+    if args.list:
+        doc = Document(src)
+        for i, para in enumerate(doc.paragraphs):
+            text = para.text.strip()
+            if text:
+                print(f'{i}: {text}')
+        sys.exit(0)
+
+    if args.reset:
+        base = os.path.splitext(os.path.basename(src))[0]
+        dirname = os.path.dirname(src) or '.'
+        dst = args.output or os.path.join(dirname, f'{base}+reset.docx')
+        result = reset_format(src, dst)
+        print(f'重置完成: {result}')
+        sys.exit(0)
 
     if args.analyze:
         report = analyze(src)
@@ -1089,13 +1189,18 @@ if __name__ == '__main__':
         if args.version:
             version = args.version
             dirname = os.path.dirname(src) or '.'
-            dst = os.path.join(dirname, f'{base}+gov-style+v{version}.docx')
+            dst = os.path.join(dirname, f'{base}+docx-helper+v{version}.docx')
         print(f'版本: v{version}')
+
+    structure = None
+    if args.structure and os.path.exists(args.structure):
+        with open(args.structure, 'r', encoding='utf-8') as f:
+            structure = json.load(f)
 
     overrides = None
     if args.overrides and os.path.exists(args.overrides):
         with open(args.overrides, 'r', encoding='utf-8') as f:
             overrides = json.load(f)
 
-    result = apply_format(src, dst, overrides)
+    result = apply_format(src, dst, overrides, structure)
     print(f'完成: {result}')
