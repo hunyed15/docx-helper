@@ -49,46 +49,121 @@ from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 排版参数
+# 排版参数（可通过 .docx-helper.json 配置覆盖）
 # ══════════════════════════════════════════════════════════════════════════════
 
-MARGINS = dict(top=Cm(3.7), bottom=Cm(3.5), left=Cm(2.7), right=Cm(2.7))
-FOOTER_DIST = Cm(2.54)
-LINE_SPACING = Pt(28.9)
 BLACK = RGBColor(0, 0, 0)
 
+# ── 运行时变量（由 _apply_config 设置，不要直接硬编码） ──
 FONT_TITLE = '方正小标宋_GBK'
-FONT_H1    = '方正黑体_GBK'
-FONT_H2    = '方正楷体_GBK'
-FONT_H3    = '方正仿宋_GBK'    # 三级标题用仿宋
-FONT_H4    = '方正仿宋_GBK'    # 四级标题用仿宋
-FONT_BODY  = '方正仿宋_GBK'
-FONT_EN    = 'Times New Roman'
+FONT_CHAPTER = '方正黑体_GBK'
+FONT_SECTION = '方正楷体_GBK'
+FONT_SUBSECTION = '方正仿宋_GBK'
+FONT_ITEM = '方正仿宋_GBK'
+FONT_BODY = '方正仿宋_GBK'
+FONT_EN = 'Times New Roman'
+# 向下兼容别名
+FONT_H1 = FONT_CHAPTER; FONT_H2 = FONT_SECTION; FONT_H3 = FONT_SUBSECTION; FONT_H4 = FONT_ITEM
 
-SIZE_2 = Pt(22)  # 二号
-SIZE_3 = Pt(16)  # 三号
-SIZE_4 = Pt(14)  # 四号
+SIZE_TITLE = Pt(22)
+SIZE_CHAPTER = Pt(16)
+SIZE_SECTION = Pt(16)
+SIZE_SUBSECTION = Pt(16)
+SIZE_ITEM = Pt(16)
+SIZE_BODY = Pt(16)
+SIZE_PAGE = Pt(14)
+SIZE_2 = SIZE_TITLE; SIZE_3 = SIZE_BODY; SIZE_4 = SIZE_PAGE
 
-# 类型元数据: (label, cn_font, en_font, size, alignment)
-# 新名（语义化）为主，旧名 h1~h4 保留为别名（向下兼容）
-TYPE_META = {
-    'title':     ('大标题',   FONT_TITLE, SIZE_2, 'center'),
-    'chapter':   ('章标题',   FONT_H1,    SIZE_3, 'left'),
-    'section':   ('节标题',   FONT_H2,    SIZE_3, 'left'),
-    'subsection':('子节标题', FONT_H3,    SIZE_3, 'left'),
-    'item':      ('条目编号', FONT_H4,    SIZE_3, 'left'),
-    'bullet':    ('项目符号', FONT_BODY,  SIZE_3, 'left'),
-    'body':      ('正文',     FONT_BODY,  SIZE_3, 'left'),
-    # 旧名兼容
-    'h1':        ('一级标题', FONT_H1, SIZE_3, 'left'),
-    'h2':        ('二级标题', FONT_H2, SIZE_3, 'left'),
-    'h3':        ('三级标题', FONT_H3, SIZE_3, 'left'),
-    'h4':        ('四级标题', FONT_H4, SIZE_3, 'left'),
+MARGINS = {}
+FOOTER_DIST = Cm(2.54)
+LINE_SPACING = Pt(28.9)
+BODY_INDENT_CHARS = 2
+PAGE_NUMBER_FORMAT = '\u2014 N \u2014'
+
+# ── 默认配置（GB/T 9704-2012 规范） ──
+DEFAULT_CONFIG = {
+    "page": {"margins": {"top": "3.7cm", "bottom": "3.5cm", "left": "2.7cm", "right": "2.7cm"}, "footer_distance": "2.54cm"},
+    "fonts": {"title": "方正小标宋_GBK", "chapter": "方正黑体_GBK", "section": "方正楷体_GBK", "subsection": "方正仿宋_GBK", "item": "方正仿宋_GBK", "body": "方正仿宋_GBK", "en": "Times New Roman"},
+    "sizes": {"title": 22, "chapter": 16, "section": 16, "subsection": 16, "item": 16, "body": 16, "page_number": 14},
+    "spacing": {"line_height": 28.9, "body_indent_chars": 2},
+    "page_number_format": "\u2014 N \u2014",
 }
+
+def _parse_cm(val):
+    if isinstance(val, (int, float)): return Cm(float(val))
+    s = str(val).strip()
+    if s.endswith('mm'): return Cm(float(s.replace('mm','')) / 10)
+    return Cm(float(s.replace('cm','')))
+
+def _deep_merge(base, override):
+    for k, v in override.items():
+        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+def _apply_config(cfg):
+    global MARGINS, FOOTER_DIST, LINE_SPACING, BODY_INDENT_CHARS, PAGE_NUMBER_FORMAT
+    global FONT_TITLE, FONT_CHAPTER, FONT_SECTION, FONT_SUBSECTION, FONT_ITEM, FONT_BODY, FONT_EN
+    global FONT_H1, FONT_H2, FONT_H3, FONT_H4
+    global SIZE_TITLE, SIZE_CHAPTER, SIZE_SECTION, SIZE_SUBSECTION, SIZE_ITEM, SIZE_BODY, SIZE_PAGE
+    global SIZE_2, SIZE_3, SIZE_4
+    p = cfg.get("page", {}); m = p.get("margins", {})
+    MARGINS = dict(top=_parse_cm(m.get("top","3.7cm")), bottom=_parse_cm(m.get("bottom","3.5cm")),
+                   left=_parse_cm(m.get("left","2.7cm")), right=_parse_cm(m.get("right","2.7cm")))
+    FOOTER_DIST = _parse_cm(p.get("footer_distance", "2.54cm"))
+    f = cfg.get("fonts", {})
+    FONT_TITLE = f.get("title", "方正小标宋_GBK")
+    FONT_CHAPTER = f.get("chapter", "方正黑体_GBK")
+    FONT_SECTION = f.get("section", "方正楷体_GBK")
+    FONT_SUBSECTION = f.get("subsection", "方正仿宋_GBK")
+    FONT_ITEM = f.get("item", "方正仿宋_GBK")
+    FONT_BODY = f.get("body", "方正仿宋_GBK")
+    FONT_EN = f.get("en", "Times New Roman")
+    FONT_H1 = FONT_CHAPTER; FONT_H2 = FONT_SECTION; FONT_H3 = FONT_SUBSECTION; FONT_H4 = FONT_ITEM
+    s = cfg.get("sizes", {})
+    SIZE_TITLE = Pt(s.get("title", 22)); SIZE_CHAPTER = Pt(s.get("chapter", 16))
+    SIZE_SECTION = Pt(s.get("section", 16)); SIZE_SUBSECTION = Pt(s.get("subsection", 16))
+    SIZE_ITEM = Pt(s.get("item", 16)); SIZE_BODY = Pt(s.get("body", 16))
+    SIZE_PAGE = Pt(s.get("page_number", 14))
+    SIZE_2 = SIZE_TITLE; SIZE_3 = SIZE_BODY; SIZE_4 = SIZE_PAGE
+    sp = cfg.get("spacing", {})
+    LINE_SPACING = Pt(sp.get("line_height", 28.9))
+    BODY_INDENT_CHARS = sp.get("body_indent_chars", 2)
+    PAGE_NUMBER_FORMAT = cfg.get("page_number_format", "\u2014 N \u2014")
+    _rebuild_type_meta()
+
+def load_config(path=None):
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    if path and os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as fh:
+            _deep_merge(cfg, json.load(fh))
+    _apply_config(cfg)
+    return cfg
+
+TYPE_META = {}
+
+def _rebuild_type_meta():
+    TYPE_META.clear()
+    TYPE_META.update({
+        'title': ('大标题', FONT_TITLE, SIZE_TITLE, 'center'),
+        'chapter': ('章标题', FONT_CHAPTER, SIZE_CHAPTER, 'left'),
+        'section': ('节标题', FONT_SECTION, SIZE_SECTION, 'left'),
+        'subsection': ('子节标题', FONT_SUBSECTION, SIZE_SUBSECTION, 'left'),
+        'item': ('条目编号', FONT_ITEM, SIZE_ITEM, 'left'),
+        'bullet': ('项目符号', FONT_BODY, SIZE_BODY, 'left'),
+        'body': ('正文', FONT_BODY, SIZE_BODY, 'left'),
+        'h1': ('一级标题', FONT_CHAPTER, SIZE_CHAPTER, 'left'),
+        'h2': ('二级标题', FONT_SECTION, SIZE_SECTION, 'left'),
+        'h3': ('三级标题', FONT_SUBSECTION, SIZE_SUBSECTION, 'left'),
+        'h4': ('四级标题', FONT_ITEM, SIZE_ITEM, 'left'),
+    })
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 辅助函数
 # ══════════════════════════════════════════════════════════════════════════════
+
+_apply_config(DEFAULT_CONFIG)  # 模块导入时初始化所有排版常量
 
 def _set_font(run, cn_font, en_font, size):
     """设置 run 的字体、字号，确保不加粗、颜色为黑色"""
@@ -112,21 +187,30 @@ def _set_spacing(para, space_before=0, space_after=0):
 
 
 def _add_page_numbers(section):
-    """在默认页脚添加 "— PAGE —" 格式页码 (4号 Times New Roman, 居中)"""
+    """在默认页脚添加页码（居中，格式由 PAGE_NUMBER_FORMAT 配置）"""
     footer = section.footer
     footer.is_linked_to_previous = False
     for p in footer.paragraphs:
         p.clear()
     p = footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _add_page_run(p, '\u2014 ')
-    _add_page_field(p)
-    _add_page_run(p, ' \u2014')
+    fmt = PAGE_NUMBER_FORMAT
+    parts = fmt.split('N', 1)
+    if len(parts) == 2:
+        if parts[0]:
+            _add_page_run(p, parts[0])
+        _add_page_field(p)
+        if parts[1]:
+            _add_page_run(p, parts[1])
+    else:
+        _add_page_run(p, '— ')
+        _add_page_field(p)
+        _add_page_run(p, ' —')
 
 
 def _add_page_run(para, text):
     run = para.add_run(text)
-    run.font.size = SIZE_4
+    run.font.size = SIZE_PAGE
     run.bold = False
     rPr = run._element.get_or_add_rPr()
     rFonts = parse_xml(f'<w:rFonts {nsdecls("w")} w:eastAsia="{FONT_EN}" w:ascii="{FONT_EN}" w:hAnsi="{FONT_EN}"/>')
@@ -320,7 +404,35 @@ def _to_chinese(n):
     if n < 100:
         t, o = divmod(n, 10)
         return _CN_NUM[t] + '十' + (_CN_NUM[o] if o else '')
+    # 100–999
+    if n < 1000:
+        h, r = divmod(n, 100)
+        result = _CN_NUM[h] + '百'
+        if r == 0:
+            return result
+        if r < 10:
+            return result + '零' + _CN_NUM[r]
+        return result + _to_chinese(r)
     return str(n)
+
+def _to_roman(n, upper=True):
+    vals = [(1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'), (100, 'C'),
+            (90, 'XC'), (50, 'L'), (40, 'XL'), (10, 'X'), (9, 'IX'),
+            (5, 'V'), (4, 'IV'), (1, 'I')]
+    result = ''
+    for v, r in vals:
+        while n >= v:
+            result += r
+            n -= v
+    return result if upper else result.lower()
+
+def _to_letters(n, upper=True):
+    result = ''
+    while n > 0:
+        n -= 1
+        result = chr(ord('A' if upper else 'a') + n % 26) + result
+        n //= 26
+    return result
 
 def _format_num(n, fmt):
     if fmt in ('chineseCount', 'chineseNumber', 'ideographTraditional', 'ideographZodiac', 'chineseLegalSimplified'):
@@ -331,8 +443,15 @@ def _format_num(n, fmt):
         return ''.join(chr(ord('０') + int(c)) for c in str(n))
     if fmt == 'decimalHalfWidth':
         return ''.join(chr(ord(' ') + int(c)) for c in str(n))
-    # decimal / upperRoman / lowerRoman / upperLetter / lowerLetter / 其他 一律回退为阿拉伯数字
-    return str(n)
+    if fmt == 'upperRoman':
+        return _to_roman(n, upper=True)
+    if fmt == 'lowerRoman':
+        return _to_roman(n, upper=False)
+    if fmt == 'upperLetter':
+        return _to_letters(n, upper=True)
+    if fmt == 'lowerLetter':
+        return _to_letters(n, upper=False)
+    return str(n)  # decimal 及未知格式回退为阿拉伯数字
 
 def _iter_all_paragraphs(doc):
     for p in doc.paragraphs:
@@ -380,9 +499,10 @@ def _compute_list_texts(doc):
     if not num_to_abs:
         return {}
     result = {}
-    counters = {}      # (numId, ilvl) -> 当前序号（嵌套/非十进制列表用各自计数器）
-    seq_decimal = 0    # 顶层十进制 "1." 标题的连续序号（跨独立列表顺次重排）
+    counters = {}      # (numId, ilvl) -> 当前序号
+    seq_decimal = 0    # 顶层十进制 "1." 标题的连续序号
     prev_meta = None   # (numId, ilvl, fmt) 上一个编号段落
+    parent_chain = []  # 父级链条，用于 %1.%2 嵌套编号
     for p in _iter_all_paragraphs(doc):
         numPr = p._element.find(qn('w:pPr'))
         np = numPr.find(qn('w:numPr')) if numPr is not None else None
@@ -417,10 +537,21 @@ def _compute_list_texts(doc):
                     if k[0] == nid:
                         del counters[k]
                 counters[(nid, il)] = info['start']
+            elif il == prev_meta[1]:
+                counters[(nid, il)] = counters.get((nid, il), info['start'] - 1) + 1
             else:
                 counters[(nid, il)] = counters.get((nid, il), info['start'] - 1) + 1
             val = counters[(nid, il)]
-            txt = re.sub(r'%1', _format_num(val, fmt), lvltext)
+            # 维护父级链条以支持 %1.%2 嵌套编号
+            parent_chain = [pc for pc in parent_chain if pc[1] <= il]
+            parent_chain.append((nid, il, val))
+            chain_sorted = sorted(parent_chain, key=lambda x: x[1])
+            def _rep(m, _fmt=fmt):
+                k = int(m.group(1)); idx = k - 1
+                if idx < len(chain_sorted):
+                    return _format_num(chain_sorted[idx][2], _fmt)
+                return ''
+            txt = re.sub(r'%(\d)', _rep, lvltext)
         if re.search(r'[.、）\)]$', txt):
             txt += ' '
         result[p._element] = txt
@@ -1169,47 +1300,47 @@ def _apply_font_to_runs(para, cn_font, en_font, size):
 def format_title(para):
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_TITLE, FONT_EN, SIZE_2)
+    _apply_font_to_runs(para, FONT_TITLE, FONT_EN, SIZE_TITLE)
 
 
 def format_h1(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H1, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_CHAPTER, FONT_EN, SIZE_CHAPTER)
 
 
 def format_h2(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H2, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_SECTION, FONT_EN, SIZE_SECTION)
 
 
 def format_h3(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H3, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_SUBSECTION, FONT_EN, SIZE_SUBSECTION)
 
 
 def format_h4(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H4, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_ITEM, FONT_EN, SIZE_ITEM)
 
 
 def format_bullet(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
 
 
 def format_body(para, indent=True):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
     if indent:
-        para.paragraph_format.first_line_indent = Pt(32)
+        para.paragraph_format.first_line_indent = Pt(int(SIZE_BODY.pt * BODY_INDENT_CHARS))
     else:
         para.paragraph_format.first_line_indent = Pt(0)
-    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
 
 
 _FORMATTERS = {
@@ -1322,6 +1453,7 @@ if __name__ == '__main__':
     parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件（启发式，仅供参考）')
     parser.add_argument('--apply', action='store_true', help='应用模式：执行排版并输出版本化文件')
     parser.add_argument('--structure', help='结构映射 JSON 文件路径（大模型判定的段落类型）')
+    parser.add_argument('--config', help='排版配置文件路径（.docx-helper.json，默认查找当前目录或 ~/.workbuddy）')
     parser.add_argument('--version', type=int, help='指定版本号（默认自动递增）')
     parser.add_argument('--output', help='直接指定输出路径（跳过版本号逻辑）')
     parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径（旧版，优先级高于 structure）')
@@ -1336,6 +1468,20 @@ if __name__ == '__main__':
     if not os.path.exists(src):
         print(f'错误: 找不到 {src}')
         sys.exit(1)
+
+    # 加载配置文件（优先级：--config > ./.docx-helper.json > ~/.workbuddy/docx-helper.json）
+    config_path = args.config
+    if not config_path:
+        for candidate in [os.path.join(os.getcwd(), '.docx-helper.json'),
+                          os.path.join(os.path.expanduser('~'), '.workbuddy', 'docx-helper.json')]:
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+    if config_path:
+        print(f'配置: {config_path}')
+        load_config(config_path)
+    else:
+        _apply_config(DEFAULT_CONFIG)  # 确保 MARGINS/TYPE_META 等被正确初始化
 
     if args.list:
         doc = Document(src)
