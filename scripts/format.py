@@ -187,25 +187,43 @@ def _set_spacing(para, space_before=0, space_after=0):
 
 
 def _add_page_numbers(section):
-    """在默认页脚添加页码（居中，格式由 PAGE_NUMBER_FORMAT 配置）"""
-    footer = section.footer
-    footer.is_linked_to_previous = False
-    for p in footer.paragraphs:
+    """在页脚添加页码：奇数页右下、偶数页左下，格式由 PAGE_NUMBER_FORMAT 配置。"""
+    # 启用奇偶页不同页脚
+    from docx.oxml import OxmlElement
+    evenAndOddHeaders = OxmlElement('w:evenAndOddHeaders')
+    section._sectPr.append(evenAndOddHeaders)
+
+    # 奇数页页脚（默认）：右对齐
+    odd_footer = section.footer
+    odd_footer.is_linked_to_previous = False
+    for p in odd_footer.paragraphs:
         p.clear()
-    p = footer.paragraphs[0]
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_odd = odd_footer.paragraphs[0]
+    p_odd.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _build_page_run(p_odd)
+
+    # 偶数页页脚：左对齐
+    even_footer = section.even_page_footer
+    even_footer.is_linked_to_previous = False
+    for p in even_footer.paragraphs:
+        p.clear()
+    p_even = even_footer.paragraphs[0]
+    p_even.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _build_page_run(p_even)
+
+def _build_page_run(para):
     fmt = PAGE_NUMBER_FORMAT
     parts = fmt.split('N', 1)
     if len(parts) == 2:
         if parts[0]:
-            _add_page_run(p, parts[0])
-        _add_page_field(p)
+            _add_page_run(para, parts[0])
+        _add_page_field(para)
         if parts[1]:
-            _add_page_run(p, parts[1])
+            _add_page_run(para, parts[1])
     else:
-        _add_page_run(p, '— ')
-        _add_page_field(p)
-        _add_page_run(p, ' —')
+        _add_page_run(para, '\u2014 ')
+        _add_page_field(para)
+        _add_page_run(para, ' \u2014')
 
 
 def _add_page_run(para, text):
@@ -1306,25 +1324,25 @@ def format_title(para):
 
 def format_h1(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para)
+    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
     _apply_font_to_runs(para, FONT_CHAPTER, FONT_EN, SIZE_CHAPTER)
 
 
 def format_h2(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para)
+    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
     _apply_font_to_runs(para, FONT_SECTION, FONT_EN, SIZE_SECTION)
 
 
 def format_h3(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para)
+    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
     _apply_font_to_runs(para, FONT_SUBSECTION, FONT_EN, SIZE_SUBSECTION)
 
 
 def format_h4(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para)
+    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
     _apply_font_to_runs(para, FONT_ITEM, FONT_EN, SIZE_ITEM)
 
 
