@@ -1342,7 +1342,8 @@ def format_h3(para):
 
 def format_h4(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_spacing(para, space_after=LINE_SPACING)  # 标题下方空 1 行
+    _set_spacing(para, space_after=LINE_SPACING)
+    para.paragraph_format.first_line_indent = Pt(int(SIZE_BODY.pt * BODY_INDENT_CHARS))
     _apply_font_to_runs(para, FONT_ITEM, FONT_EN, SIZE_ITEM)
 
 
