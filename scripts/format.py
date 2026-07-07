@@ -24,17 +24,18 @@
 
 排版规则（字体/字号/对齐）:
   1. 页面: A4, 上 3.7 / 下 3.5 / 左 2.7 / 右 2.7 cm
-  2. title  (大标题):   2号 方正小标宋_GBK, 居中
-  3. h1     (章标题):   3号 方正黑体_GBK, 左对齐
-  4. h2     (节标题):   3号 方正楷体_GBK, 左对齐
-  5. h3     (子节标题): 3号 方正仿宋_GBK, 左对齐
-  6. h4     (条目编号): 3号 方正仿宋_GBK, 左对齐, 无缩进
-  7. bullet (项目符号): 3号 方正仿宋_GBK, 左对齐
-  8. body   (正文):     3号 方正仿宋_GBK, 首行缩进 2 字, 行距 28.9 磅
+  2. title     (大标题):    2号 方正小标宋_GBK, 居中
+  3. chapter   (章标题):    3号 方正黑体_GBK, 左对齐
+  4. section   (节标题):    3号 方正楷体_GBK, 左对齐
+  5. subsection(子节标题):  3号 方正仿宋_GBK, 左对齐
+  6. item      (条目编号):  3号 方正仿宋_GBK, 左对齐, 无缩进
+  7. bullet    (项目符号):  3号 方正仿宋_GBK, 左对齐
+  8. body      (正文):      3号 方正仿宋_GBK, 首行缩进 2 字, 行距 28.9 磅
   9. 页码: 4号 Times New Roman, "— N —" 格式, 居中
 
 注意：标题层级判定应按语义深度（relative depth），而非按编号字符正则匹配。
-例：1.编制背景 和 2.1 盘点目标 同为「章的直接子级」→ 均判 h2（楷体）；4.1.1 按分层迁移 是「h2 的子级」→ 判 h3（仿宋）。
+例：1.编制背景 和 2.1 盘点目标 同为「章的直接子级」→ 均判 section（楷体）；4.1.1 按分层迁移 是「h2 的子级」→ 判 subsection（仿宋）。
+旧名 h1/h2/h3/h4 仍可接收（format.py 内部自动别名映射）。
 
 字体依赖: 需安装方正小标宋/黑体/楷体/仿宋_GBK, 否则 Word 会提示字体缺失。
 """
@@ -69,14 +70,20 @@ SIZE_3 = Pt(16)  # 三号
 SIZE_4 = Pt(14)  # 四号
 
 # 类型元数据: (label, cn_font, en_font, size, alignment)
+# 新名（语义化）为主，旧名 h1~h4 保留为别名（向下兼容）
 TYPE_META = {
-    'title':  ('大标题',   FONT_TITLE, SIZE_2, 'center'),
-    'h1':     ('一级标题', FONT_H1,    SIZE_3, 'left'),
-    'h2':     ('二级标题', FONT_H2,    SIZE_3, 'left'),
-    'h3':     ('三级标题', FONT_H3,    SIZE_3, 'left'),
-    'h4':     ('四级标题', FONT_H4,    SIZE_3, 'left'),
-    'bullet': ('项目符号', FONT_BODY,  SIZE_3, 'left'),
-    'body':   ('正文',     FONT_BODY,  SIZE_3, 'left'),
+    'title':     ('大标题',   FONT_TITLE, SIZE_2, 'center'),
+    'chapter':   ('章标题',   FONT_H1,    SIZE_3, 'left'),
+    'section':   ('节标题',   FONT_H2,    SIZE_3, 'left'),
+    'subsection':('子节标题', FONT_H3,    SIZE_3, 'left'),
+    'item':      ('条目编号', FONT_H4,    SIZE_3, 'left'),
+    'bullet':    ('项目符号', FONT_BODY,  SIZE_3, 'left'),
+    'body':      ('正文',     FONT_BODY,  SIZE_3, 'left'),
+    # 旧名兼容
+    'h1':        ('一级标题', FONT_H1, SIZE_3, 'left'),
+    'h2':        ('二级标题', FONT_H2, SIZE_3, 'left'),
+    'h3':        ('三级标题', FONT_H3, SIZE_3, 'left'),
+    'h4':        ('四级标题', FONT_H4, SIZE_3, 'left'),
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -251,11 +258,17 @@ def _find_title_idx(paragraphs):
     return -1
 
 
-# 编号检测返回的类型中，h3_multi 和 chapter 需要映射到现有 TYPE_META
+# 编号检测返回的类型中，h3_multi / chapter / h5 需要映射到现有 TYPE_META
+# 同时提供新旧别名：chapter=h1, section=h2, subsection=h3, item=h4
 _TYPE_ALIAS = {
     'h3_multi': 'h3',
     'chapter': 'h1',
     'h5': 'h4',
+    # 新名 → 旧名（统一收敛到 formatter）
+    'chapter':    'h1',
+    'section':    'h2',
+    'subsection': 'h3',
+    'item':       'h4',
 }
 
 def _resolve_type(ptype):
@@ -1200,13 +1213,18 @@ def format_body(para, indent=True):
 
 
 _FORMATTERS = {
-    'title':  format_title,
-    'h1':     format_h1,
-    'h2':     format_h2,
-    'h3':     format_h3,
-    'h4':     format_h4,
-    'bullet': format_bullet,
-    'body':   format_body,
+    'title':      format_title,
+    'chapter':    format_h1,
+    'section':    format_h2,
+    'subsection': format_h3,
+    'item':       format_h4,
+    'bullet':     format_bullet,
+    'body':       format_body,
+    # 旧名兼容
+    'h1': format_h1,
+    'h2': format_h2,
+    'h3': format_h3,
+    'h4': format_h4,
 }
 
 
