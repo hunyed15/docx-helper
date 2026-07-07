@@ -98,6 +98,32 @@ python scripts/format.py --apply 报告+reset.docx --structure structure.json --
 
 不加 `--structure` 时，脚本回退到旧版正则启发式（仅兜底，不推荐）。
 
+### 自动检测模式（P2）— 一条命令搞定
+
+对于大多数标准编号文档（GB 或 x.y 体系），一条命令即可自动排版，无需手动判结构：
+
+```bash
+# 自动检测编号层级 + 排版
+python scripts/format.py --apply 报告+reset.docx --auto
+
+# 仅生成 structure.json 初稿（供审阅/修改）
+python scripts/format.py --auto 报告+reset.docx --output structure.json
+```
+
+`--auto` 按以下规则自动推断层级：
+
+| 编号模式 | 判为 | 说明 |
+|---------|------|------|
+| `一、二、…` | `chapter` | |
+| `1.` `2.1` `3.1` … | `section` | **统一为同级**——无论有无章号前缀 |
+| `（一）` 出现时 → `1.` 降为 `subsection` | 兼容纯 GB 文档 |
+| `4.1.1`（三层数字） | `subsection` | |
+| `（1）①` | `item` | |
+| `·●◆` | `bullet` | |
+| 其余 | `body` | |
+
+> 覆盖约 80% 的标准/混合编号文档。不规则文档（如大量无编号标题）建议仍用 LLM 判结构 + `--structure`。
+
 ### 迭代工作流
 
 ```
