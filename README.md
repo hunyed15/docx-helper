@@ -45,29 +45,33 @@ Skill 立即启动，开始分析诊断。精准、零歧义。
 
 > 帮我把这份报告排版
 
-AI 会自动读取文档，逐段分析标题层级、字体、编号，然后把诊断结果一条条列出来：
+AI 会先**重置**文档的所有手动格式，再**通读全文判断结构**——哪些是一级标题、哪些是无编号的小节标题（如"编制背景"）、哪些是编号列表——然后把结构方案列给你确认：
 
-> "第 0 段识别为大标题，将设为方正小标宋二号居中；第 3 段识别为一级标题'一、项目背景'，将设为黑体三号；第 5 段使用了 '●' 符号，参考 GB/T 9704-2012 建议改为'（一）'……"
+> "通读后判断：第 0 段是一级标题'一、项目背景'（黑体）；第 1 段'编制背景'是无编号小节标题（楷体）；第 5 段'(1)'是四级标题（仿宋）……共 9 个一级、6 个二级、42 个正文。确认吗？"
 
 你只需要回复确认或调整：
 
-> "第 5 段的 ● 不用改，其他没问题"
+> "第 12 段应该是二级标题不是正文"
 
-几秒钟后，`报告+docx-helper+v1.docx` 就出来了。全程没打开过 Word。
+确认后几秒钟，`报告+docx-helper+v1.docx` 就出来了。全程没打开过 Word。
 
 ### 也支持命令行
 
-如果你习惯终端操作：
+如果你习惯终端操作，标准四步：
 
 ```bash
-# 分析诊断：输出 JSON 差分报告
-python scripts/format.py --analyze 报告.docx
+# 1. 重置：清空所有手动格式，得到中性文档
+python scripts/format.py --reset 报告.docx
+# 输出：报告+reset.docx
 
-# 应用排版：自动分配版本号
-python scripts/format.py --apply 报告.docx
+# 2. 列出段落（可选，便于判结构）
+python scripts/format.py --list 报告+reset.docx
 
-# 带覆盖规则
-python scripts/format.py --apply 报告.docx --overrides overrides.json
+# 3. 把判好的结构写入 structure.json（由大模型/你决定每段类型）
+
+# 4. 套用排版
+python scripts/format.py --apply 报告+reset.docx --structure structure.json
+# 输出：报告+reset+docx-helper+v1.docx
 ```
 
 两种方式底层是同一套引擎，选你喜欢的。
@@ -100,52 +104,61 @@ AI 会自动处理 SKILL 加载、`python-docx` 依赖安装等所有步骤。
 ### 命令一览
 
 ```bash
-# 分析模式：输出 JSON 差分报告到 stdout
+# 重置模式：清空所有手动格式，输出 原名+reset.docx（中性文档）
+python scripts/format.py --reset <文件.docx>
+
+# 列出模式：打印「索引: 文本」，便于判结构
+python scripts/format.py --list <文件.docx>
+
+# 分析模式（兜底）：输出 JSON 差分报告到 stdout（正则启发式，仅供参考）
 python scripts/format.py --analyze <文件.docx>
 
-# 应用模式：执行排版，自动分配版本号
-python scripts/format.py --apply <文件.docx>
+# 应用模式：按 structure.json 套用排版
+python scripts/format.py --apply <文件.docx> --structure structure.json
 
 # 应用模式 + 指定版本号
-python scripts/format.py --apply <文件.docx> --version 3
+python scripts/format.py --apply <文件.docx> --structure structure.json --version 3
 
 # 应用模式 + 自定义输出路径
-python scripts/format.py --apply <文件.docx> --output 输出.docx
+python scripts/format.py --apply <文件.docx> --structure structure.json --output 输出.docx
 
-# 应用模式 + 覆盖规则
-python scripts/format.py --apply <文件.docx> --overrides overrides.json
-
-# 直接模式（等同于 --apply）
+# 直接模式（无 structure 时回退正则启发式，等同于 --apply）
 python scripts/format.py <文件.docx>
 ```
 
-### 覆盖规则（overrides.json）
+### 结构映射（structure.json）
 
-当分析报告中某段被错误识别时，用覆盖规则手动指定其类型：
+排版前，大模型（或你）会判定每段类型，写入 `structure.json`。这是套用排版的依据：
 
 ```json
 {
   "paragraphs": {
-    "3": "body",
-    "7": "h1",
+    "0": "h1",
+    "1": "h2",
+    "3": "h2",
+    "5": "h4",
     "12": "h2"
-  }
+  },
+  "cover": false,
+  "title_index": null
 }
 ```
 
-> Key 是段落索引（从 0 开始），Value 可以是 `title` / `h1` / `h2` / `h3` / `h4` / `body` / `bullet`。
+> `paragraphs` 的 Key 是段落索引（从 0 开始），Value 为 `title` / `h1` / `h2` / `h3` / `h4` / `body` / `bullet`；`cover` 表示该文档是否有封面页；`title_index` 为大标题所在段落（无则为 `null`）。
+
+> 无编号的小节标题（如"编制背景"）必须靠上下文识别，正则无法可靠判断——这正是先重置、再让大模型判结构的意义。
 
 ### 迭代工作流
 
-排版不是一锤子买卖。你可以反复迭代：
+排版不是一锤子买卖。基于同一份 reset 文档反复迭代：
 
 ```
-v1: 报告.docx → 分析 → 确认 → 报告+docx-helper+v1.docx
-v2: 拿 v1 → 再分析 → 再确认 → 报告+docx-helper+v2.docx
-v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
+v1: 报告.docx → reset → 判结构 → 确认 → 报告+reset+docx-helper+v1.docx
+v2: 微调 structure.json → 报告+reset+docx-helper+v2.docx
+v3: 继续微调 → 报告+reset+docx-helper+v3.docx
 ```
 
-每次基于上一个版本继续调整，完整追溯，随时回退。
+每次基于同一份 reset 文档继续调整，完整追溯，随时回退。
 
 ---
 
