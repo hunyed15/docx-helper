@@ -1440,6 +1440,77 @@ def apply_format(input_path, output_path, overrides=None, structure=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 自动结构检测（P2）：扫描编号模式，推断层级，生成 structure.json 初稿
+# ══════════════════════════════════════════════════════════════════════════════
+
+def auto_detect_structure(doc_path):
+    """扫描 reset 文档，按编号模式自动推断层级。
+
+    核心规则（覆盖 GB 文档和混合编号文档）：
+    - 一、二、…   → chapter（章）
+    - 如果文档使用了「（一）」→ 1. 降为 subsection；否则 1. / 2.1 均为 section
+    - x.y.z       → subsection（子节）
+    - （1）①      → item（条目）
+    - ·●◆         → bullet（项目符号）
+    - 其余         → body（正文）
+
+    返回 structure dict，可直接喂给 --structure。
+    """
+    doc = Document(doc_path)
+    paragraphs = doc.paragraphs
+
+    # 先探测文档是否使用了 GB 括号中文编号（影响 1. 的层级判定）
+    has_chinese_paren_section = False
+    for p in paragraphs:
+        if re.match(r'^（[一二三四五六七八九十]+）', p.text.strip()):
+            has_chinese_paren_section = True
+            break
+
+    type_map = {}
+    for i, p in enumerate(paragraphs):
+        text = p.text.strip()
+        if not text:
+            continue
+        ptype = _auto_classify(text, has_chinese_paren_section)
+        if ptype:
+            type_map[str(i)] = ptype
+
+    cover_info = _detect_cover(paragraphs)
+    title_idx = _find_title_idx(paragraphs)
+
+    return {
+        "paragraphs": type_map,
+        "cover": cover_info is not None,
+        "title_index": title_idx if title_idx >= 0 else None,
+    }
+
+def _auto_classify(text, has_chinese_paren=False):
+    """自动分类单段文本；has_chinese_paren 影响 1. 是 section 还是 subsection。"""
+    # 章
+    if re.match(r'^[一二三四五六七八九十]+[、]', text):
+        return 'chapter'
+    # 子节：x.y.z
+    if re.match(r'^\d+\.\d+\.\d+', text):
+        return 'subsection'
+    # 节：x.y（两层）
+    if re.match(r'^\d+\.\d+\s', text) or re.match(r'^\d+\.\d+[、]', text):
+        return 'section'
+    # 节：单层数字（若文档有（一）则降为 subsection）
+    if re.match(r'^\d+[\.、]', text):
+        return 'subsection' if has_chinese_paren else 'section'
+    # GB 括号中文
+    if re.match(r'^（[一二三四五六七八九十]+）', text):
+        return 'section'
+    # 条目
+    if re.match(r'^\(\d+\)', text) or re.match(r'^[①-⑩]', text):
+        return 'item'
+    # 项目符号
+    if re.match(r'^[·•●◆★■▶▪○□△▷◇♦☞✓✔]', text):
+        return 'bullet'
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1453,6 +1524,7 @@ if __name__ == '__main__':
     parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件（启发式，仅供参考）')
     parser.add_argument('--apply', action='store_true', help='应用模式：执行排版并输出版本化文件')
     parser.add_argument('--structure', help='结构映射 JSON 文件路径（大模型判定的段落类型）')
+    parser.add_argument('--auto', action='store_true', help='自动检测编号体系生成 structure.json（跳过 LLM 判结构，覆盖 ~80% 标准文档）')
     parser.add_argument('--config', help='排版配置文件路径（.docx-helper.json，默认查找当前目录或 ~/.workbuddy）')
     parser.add_argument('--version', type=int, help='指定版本号（默认自动递增）')
     parser.add_argument('--output', help='直接指定输出路径（跳过版本号逻辑）')
@@ -1482,6 +1554,22 @@ if __name__ == '__main__':
         load_config(config_path)
     else:
         _apply_config(DEFAULT_CONFIG)  # 确保 MARGINS/TYPE_META 等被正确初始化
+
+    if args.auto:
+        # 自动检测编号体系
+        auto_struct = auto_detect_structure(src)
+        if not args.apply:
+            # --auto 单独使用：输出 structure.json
+            if args.output:
+                with open(args.output, 'w', encoding='utf-8') as f:
+                    json.dump(auto_struct, f, ensure_ascii=False, indent=2)
+                print(f'结构已保存: {args.output}')
+            else:
+                out = json.dumps(auto_struct, ensure_ascii=False, indent=2)
+                if hasattr(sys.stdout, 'reconfigure'):
+                    sys.stdout.reconfigure(encoding='utf-8')
+                print(out)
+            sys.exit(0)
 
     if args.list:
         doc = Document(src)
@@ -1518,9 +1606,13 @@ if __name__ == '__main__':
         print(f'版本: v{version}')
 
     structure = None
+    # --structure 优先于 --auto
     if args.structure and os.path.exists(args.structure):
         with open(args.structure, 'r', encoding='utf-8') as f:
             structure = json.load(f)
+    elif args.auto:
+        structure = auto_detect_structure(src)
+        print(f'自动检测: {len(structure["paragraphs"])} 个段落已分类')
 
     overrides = None
     if args.overrides and os.path.exists(args.overrides):
