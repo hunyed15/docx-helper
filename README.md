@@ -9,7 +9,9 @@
 
 ## ? 它能做什么
 
-`docx-helper` 是一个 AI Skill 和命令行工具，按我自己常用的排版习惯（参考 GB/T 9704-2012）自动调整 Word 文档格式。一句话说：**把你在 Word 里反复手动调的页边距、字体、行距、页码，全部自动搞定。**
+`docx-helper` 是一个 AI Skill 和命令行工具，按用户的材料排版手册（系统内嵌，辅以 GB/T 9704-2012 兜底）自动调整 Word 文档格式。一句话说：**把你在 Word 里反复手动调的页边距、字体、行距、页码，全部自动搞定。**
+
+> 格式优先级：**用户排版手册 > GB/T 9704-2012 > 内置默认值**。手册有规定的绝不查 GB，两者冲突时以手册为准。
 
 排版后你的文档长这样：A4 纸、方正小标宋二号大标题、黑体/楷体/仿宋分层级标题、仿宋三号正文固定行距 28.9 磅、首行缩进两字符、"— N —" 格式页码。干干净净，看着舒服。
 
@@ -19,7 +21,7 @@
 
 - **页面设置**：A4 纸张、标准页边距（上 3.7 / 下 3.5 / 左右 2.7 cm）
 - **字体切换**：自动为标题/正文换上对应的方正字库（方正小标宋/黑体/楷体/仿宋）
-- **标题识别**：16 种正则模式自动识别大标题、一至四级标题、项目符号、正文
+- **标题识别**：16 种正则模式兜底识别章/节/子节/条目/项目符号/正文
 - **编号层级分析**：将文档实际编号与参考标准对比，给出修改建议
 - **封面排版**：自动检测封面页，排版标题、副标题、单位、日期
 - **页码添加**：自动添加 "— N —" 格式页码
@@ -27,22 +29,54 @@
 
 ---
 
-## ? 快速开始
+## 快速开始
 
-```bash
-# 第一步：分析文档（不改文件，只出报告）
-python scripts/format.py --analyze 报告.docx
+安装完成后，在 WorkBuddy 中有两种调用方式：
 
-# 第二步：查看 JSON 报告，确认每段识别是否正确
-# 如果有需要调整的段落，准备一个 overrides.json
+**方式一：斜杠命令（最直接）**
 
-# 第三步：应用排版
-python scripts/format.py --apply 报告.docx
-
-# 输出：报告+docx-helper+v1.docx
+```
+/docx-helper 检查这份文档的格式
 ```
 
-三步走完，一份规范排版的公文就出来了。
+Skill 立即启动，开始分析诊断。精准、零歧义。
+
+**方式二：自然语言**
+
+把 `.docx` 文件拖进对话框，直接说：
+
+> 帮我把这份报告排版
+
+AI 会先**重置**文档的所有手动格式，再**通读全文判断结构**——哪些是章标题（chapter）、哪些是节标题（section，含无编号的小节如"编制背景"）、哪些是编号条目（item）——然后把结构方案列给你确认：
+
+> "通读后判断：第 0 段是章标题'一、项目背景'（黑体）；第 1 段'编制背景'是节标题（楷体）；第 5 段'(1)'是条目（仿宋）……共 9 个 chapter、6 个 section、42 个 body。确认吗？"
+
+你只需要回复确认或调整：
+
+> "第 12 段应该是 section 不是 body"
+
+确认后几秒钟，`报告+docx-helper+v1.docx` 就出来了。全程没打开过 Word。
+
+### 也支持命令行
+
+如果你习惯终端操作，标准四步：
+
+```bash
+# 1. 重置：清空所有手动格式，得到中性文档
+python scripts/format.py --reset 报告.docx
+# 输出：报告+reset.docx
+
+# 2. 列出段落（可选，便于判结构）
+python scripts/format.py --list 报告+reset.docx
+
+# 3. 把判好的结构写入 structure.json（由大模型/你决定每段类型）
+
+# 4. 套用排版
+python scripts/format.py --apply 报告+reset.docx --structure structure.json
+# 输出：报告+reset+docx-helper+v1.docx
+```
+
+两种方式底层是同一套引擎，选你喜欢的。
 
 ---
 
@@ -59,9 +93,9 @@ AI 会自动处理 SKILL 加载、`python-docx` 依赖安装等所有步骤。
 > **前置条件**：使用前请确保系统已安装以下四款方正字体，否则排版后的文档在 Word 中打开会提示字体缺失：
 >
 > - **方正小标宋_GBK** — 用于大标题
-> - **方正黑体_GBK** — 用于一级标题
-> - **方正楷体_GBK** — 用于二级标题
-> - **方正仿宋_GBK** — 用于三级/四级标题和正文
+> - **方正黑体_GBK** — 用于章标题 (chapter)
+> - **方正楷体_GBK** — 用于节标题 (section)
+> - **方正仿宋_GBK** — 用于子节标题/条目/正文 (subsection / item / body)
 >
 > Windows：右键字体文件 → "为所有用户安装"；macOS：双击字体文件 → "安装字体"；Linux：放入 `~/.fonts/` 后运行 `fc-cache -fv`。
 
@@ -72,52 +106,61 @@ AI 会自动处理 SKILL 加载、`python-docx` 依赖安装等所有步骤。
 ### 命令一览
 
 ```bash
-# 分析模式：输出 JSON 差分报告到 stdout
+# 重置模式：清空所有手动格式，输出 原名+reset.docx（中性文档）
+python scripts/format.py --reset <文件.docx>
+
+# 列出模式：打印「索引: 文本」，便于判结构
+python scripts/format.py --list <文件.docx>
+
+# 分析模式（兜底）：输出 JSON 差分报告到 stdout（正则启发式，仅供参考）
 python scripts/format.py --analyze <文件.docx>
 
-# 应用模式：执行排版，自动分配版本号
-python scripts/format.py --apply <文件.docx>
+# 应用模式：按 structure.json 套用排版
+python scripts/format.py --apply <文件.docx> --structure structure.json
 
 # 应用模式 + 指定版本号
-python scripts/format.py --apply <文件.docx> --version 3
+python scripts/format.py --apply <文件.docx> --structure structure.json --version 3
 
 # 应用模式 + 自定义输出路径
-python scripts/format.py --apply <文件.docx> --output 输出.docx
+python scripts/format.py --apply <文件.docx> --structure structure.json --output 输出.docx
 
-# 应用模式 + 覆盖规则
-python scripts/format.py --apply <文件.docx> --overrides overrides.json
-
-# 直接模式（等同于 --apply）
+# 直接模式（无 structure 时回退正则启发式，等同于 --apply）
 python scripts/format.py <文件.docx>
 ```
 
-### 覆盖规则（overrides.json）
+### 结构映射（structure.json）
 
-当分析报告中某段被错误识别时，用覆盖规则手动指定其类型：
+排版前，大模型（或你）会判定每段类型，写入 `structure.json`。这是套用排版的依据：
 
 ```json
 {
   "paragraphs": {
-    "3": "body",
-    "7": "h1",
-    "12": "h2"
-  }
+    "0": "chapter",
+    "1": "section",
+    "3": "section",
+    "5": "item",
+    "12": "section"
+  },
+  "cover": false,
+  "title_index": null
 }
 ```
 
-> Key 是段落索引（从 0 开始），Value 可以是 `title` / `h1` / `h2` / `h3` / `h4` / `body` / `bullet`。
+> `paragraphs` 的 Key 是段落索引（从 0 开始），Value 为 `title` / `chapter` / `section` / `subsection` / `item` / `body` / `bullet`；`cover` 表示该文档是否有封面页；`title_index` 为大标题所在段落（无则为 `null`）。旧名 `h1`/`h2`/`h3`/`h4` 仍可接收（自动别名）。
+
+> 无编号的小节标题（如"编制背景"）必须靠上下文识别，正则无法可靠判断——这正是先重置、再让大模型判结构的意义。
 
 ### 迭代工作流
 
-排版不是一锤子买卖。你可以反复迭代：
+排版不是一锤子买卖。基于同一份 reset 文档反复迭代：
 
 ```
-v1: 报告.docx → 分析 → 确认 → 报告+docx-helper+v1.docx
-v2: 拿 v1 → 再分析 → 再确认 → 报告+docx-helper+v2.docx
-v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
+v1: 报告.docx → reset → 判结构 → 确认 → 报告+reset+docx-helper+v1.docx
+v2: 微调 structure.json → 报告+reset+docx-helper+v2.docx
+v3: 继续微调 → 报告+reset+docx-helper+v3.docx
 ```
 
-每次基于上一个版本继续调整，完整追溯，随时回退。
+每次基于同一份 reset 文档继续调整，完整追溯，随时回退。
 
 ---
 
@@ -137,12 +180,12 @@ v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
 
 | 用途 | 字体 | 字号 |
 |------|------|------|
-| 大标题 | 方正小标宋_GBK | 二号 (22pt) |
-| 一级标题（一、） | 方正黑体_GBK | 三号 (16pt) |
-| 二级标题（（一）） | 方正楷体_GBK | 三号 (16pt) |
-| 三级标题（1.） | 方正仿宋_GBK | 三号 (16pt) |
-| 四级标题（(1)） | 方正仿宋_GBK | 三号 (16pt) |
-| 正文 | 方正仿宋_GBK | 三号 (16pt) |
+| 大标题 (title) | 方正小标宋_GBK | 二号 (22pt) |
+| 章标题 (chapter) | 方正黑体_GBK | 三号 (16pt) |
+| 节标题 (section) | 方正楷体_GBK | 三号 (16pt) |
+| 子节标题 (subsection) | 方正仿宋_GBK | 三号 (16pt) |
+| 条目编号 (item) | 方正仿宋_GBK | 三号 (16pt) |
+| 正文 (body) | 方正仿宋_GBK | 三号 (16pt) |
 | 页码 | Times New Roman | 四号 (14pt) |
 
 > 所有西文/数字使用 Times New Roman，无加粗，全黑色。
@@ -156,16 +199,16 @@ v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
 | 大标题上方 | 空 2 行 |
 | 大标题下方 | 空 1 行 |
 
-### 编号层级（参考 GB/T 9704-2012）
+### 编号层级（参考 GB/T 9704-2012，按语义深度判定）
 
-参考标准中结构层次依次使用：
+GB/T 9704-2012 提供的是一种**常见的编号惯例**（`一、`→`（一）`→`1.`→`（1）`），但不是唯一写法。实际文档中，判定层级看**语义深度**而非编号字形：
 
-| 层级 | 编号格式 | 字体 |
-|------|---------|------|
-| 一级 | `一、二、三、` | 黑体 |
-| 二级 | `（一）（二）` | 楷体 |
-| 三级 | `1. 2. 3.` | 仿宋 |
-| 四级 | `（1）（2）` `①②` | 仿宋 |
+| 结构类型 | 常见编号格式 | 字体 | 说明 |
+|---------|-------------|------|------|
+| `chapter` (章) | `一、二、三、` | 黑体 | 文档最顶层分章 |
+| `section` (节) | `1.` `2.1` `（一）` | 楷体 | 章的直属子级，**无论写成什么编号** |
+| `subsection` (子节) | `4.1.1` `8.1.1` | 仿宋 | 节的直属子级（三层编号） |
+| `item` (条目) | `（1）` `①②` | 仿宋 | 带括号/圈号的列表项 |
 | — | `● ◆ ★ ■` | 建议改用（一）（1）等编号 |
 | — | `1.1 / 4.1.1` | 技术文档可用，正式材料建议用国标编号 |
 
@@ -173,13 +216,13 @@ v3: 拿 v2 → ... → 报告+docx-helper+v3.docx
 
 ## ? JSON 分析报告说明
 
-运行 `--analyze` 后输出的 JSON 报告包含以下字段：
+在 AI 客户端中，分析结果会以自然语言直接在对话框里展示，你不需要关心 JSON 长什么样。以下是底层报告的各字段说明，供命令行用户参考：
 
 | 字段 | 说明 |
 |------|------|
 | `page_changes` | 页面边距变更对比（当前值 → 目标值） |
 | `cover_detection` | 封面检测结果（标题/副标题/单位/日期各元素识别） |
-| `numbering_analysis` | 编号层级分析（文档实际编号 vs 国标要求，含不合规项修改建议） |
+| `numbering_analysis` | 编号层级分析（文档实际编号 vs 参考标准，含修改建议） |
 | `paragraph_classifications` | 逐段识别结果（类型、置信度、当前格式 → 目标格式） |
 | `color_warnings` | 非黑色文字警告 |
 | `bold_warnings` | 将移除的加粗警告 |
@@ -208,9 +251,9 @@ A: 系统未安装方正字库。请按上方"安装"章节中的字体安装说
 
 A: 不能。请先在 Word 中打开 `.doc` 文件，另存为 `.docx` 格式。
 
-**Q: 脚本把我的标题识别错了怎么办？**
+**Q: AI 把某段标题识别错了怎么办？**
 
-A: 用覆盖规则。准备一个 `overrides.json`，指定某段的手动类型，然后 `--apply` 时带上 `--overrides`。
+A: 分析报告出来后，直接在对话框说"第 N 段不是标题，改成正文"，AI 会记住并应用调整。命令行用户可以用 `overrides.json`。
 
 **Q: 排版后表格里的格式被改了？**
 
@@ -236,9 +279,15 @@ docx-helper/
 
 ---
 
-## ? 参考标准
+## 📋 参考标准
 
-排版规则参考 **GB/T 9704-2012**《党政机关公文格式》，具体摘录见 `references/gbt9704_2012.md`。这是我个人常用的排版习惯来源，你可以根据自己的需要在确认阶段调整。
+**优先级：用户排版手册 > GB/T 9704-2012 > 内置默认。**
+
+- 页面、字体、行距、页码 → 依据**用户排版手册**（系统内嵌，不可被 GB 覆盖）
+- 手册未覆盖 → **GB/T 9704-2012**《党政机关公文格式》兜底（如多级编号的（一）/1./（1）层级字体）
+- 两者均无规定 → 脚本内置默认值
+
+手册摘录见 `references/user-style-guide.md`，国标摘录见 `references/gbt9704_2012.md`。
 
 ---
 

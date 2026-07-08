@@ -1,0 +1,34 @@
+{
+  "page": {
+    "margins": {
+      "top": "3.7cm",
+      "bottom": "3.5cm",
+      "left": "2.7cm",
+      "right": "2.7cm"
+    },
+    "footer_distance": "2.54cm"
+  },
+  "fonts": {
+    "title": "方正小标宋_GBK",
+    "chapter": "方正黑体_GBK",
+    "section": "方正楷体_GBK",
+    "subsection": "方正仿宋_GBK",
+    "item": "方正仿宋_GBK",
+    "body": "方正仿宋_GBK",
+    "en": "Times New Roman"
+  },
+  "sizes": {
+    "title": 22,
+    "chapter": 16,
+    "section": 16,
+    "subsection": 16,
+    "item": 16,
+    "body": 16,
+    "page_number": 14
+  },
+  "spacing": {
+    "line_height": 28.9,
+    "body_indent_chars": 2
+  },
+  "page_number_format": "— N —"
+}
