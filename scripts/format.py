@@ -1,35 +1,41 @@
 #!/usr/bin/env python3
 """
-公文格式刷 — 对已有 .docx 文档分析并套用党政机关公文排版。
+文档排版助手 (docx-helper) — 对已有 .docx 文档套用规范排版。
 
-交互式工作流:
-  1. 分析模式: python format.py --analyze <input.docx>
-     → 输出 JSON 差分报告（不改任何文件），含：
-       - 页面变更、每段识别结果、字体颜色警告、编号层级分析
+推荐工作流（大模型驱动）:
+  0. 重置模式: python format.py --reset <input.docx>
+     → 彻底清空所有手动格式（字体/字号/颜色/加粗/缩进/自动编号），
+        输出 {原名}+reset.docx，得到一个"中性"文档，便于下一步判结构。
 
-  2. 应用模式: python format.py --apply <input.docx> [--version N]
-     → 按规则排版，输出到版本化文件: {原名}+gov-style+v{N}.docx
+  1. 大模型判结构: 阅读 reset 文档全文，决定每个段落的类型
+        （title/h1/h2/h3/h4/bullet/body），写入 structure.json:
+        {"paragraphs": {"1": "h2", "3": "h2", "5": "h4"}, "cover": false, "title_index": null}
 
-  3. 直接模式（兼容）: python format.py <input.docx>
+  2. 应用模式: python format.py --apply <reset.docx> --structure structure.json
+     → 按结构映射套用排版，输出版本化文件: {原名}+docx-helper+v{N}.docx
+
+  3. 直接模式（兼容，无 structure 时走启发式）: python format.py <input.docx>
      → 等同于 --apply（自动分配版本号）
 
 版本化命名:
-  - 第一次运行: 报告+gov-style+v1.docx
-  - 第二次运行: 报告+gov-style+v2.docx
+  - 第一次运行: 报告+docx-helper+v1.docx
+  - 第二次运行: 报告+docx-helper+v2.docx
   - 每次自动递增版本号，永不覆盖原文件或旧版本
 
-排版规则:
-  1. 页面: A4, 上 3.7 / 下 3.5 / 左 2.7 / 右 2.7 cm, 页脚距底边 2.54 cm
-  2. 字号映射: 二号=22pt, 三号=16pt, 四号=14pt
-  3. 大标题: 2号 方正小标宋_GBK, 居中, 不加粗
-  4. 一级标题: 3号 方正黑体_GBK, 不加粗 (匹配 "一、"/"二、" 等)
-  5. 二级标题: 3号 方正楷体_GBK, 不加粗 (匹配 "（一）"/"（二）" 等)
-  6. 三级标题: 3号 方正仿宋_GBK, 不加粗 (匹配 "1." / "1）" 等)
-  7. 四级标题: 3号 方正仿宋_GBK, 不加粗 (匹配 "(1)" / "①" 等)
-  8. 正文: 3号 方正仿宋_GBK, 西文/数字 Times New Roman, 行距 28.9 磅, 首行缩进 2 字
+排版规则（字体/字号/对齐）:
+  1. 页面: A4, 上 3.7 / 下 3.5 / 左 2.7 / 右 2.7 cm
+  2. title     (大标题):    2号 方正小标宋_GBK, 居中
+  3. chapter   (章标题):    3号 方正黑体_GBK, 左对齐
+  4. section   (节标题):    3号 方正楷体_GBK, 左对齐
+  5. subsection(子节标题):  3号 方正仿宋_GBK, 左对齐
+  6. item      (条目编号):  3号 方正仿宋_GBK, 左对齐, 无缩进
+  7. bullet    (项目符号):  3号 方正仿宋_GBK, 左对齐
+  8. body      (正文):      3号 方正仿宋_GBK, 首行缩进 2 字, 行距 28.9 磅
   9. 页码: 4号 Times New Roman, "— N —" 格式, 居中
 
-  10. 非黑色文字: 分析时标注警告, 应用时强制设为黑色（政府公文要求黑色）
+注意：标题层级判定应按语义深度（relative depth），而非按编号字符正则匹配。
+例：1.编制背景 和 2.1 盘点目标 同为「章的直接子级」→ 均判 section（楷体）；4.1.1 按分层迁移 是「h2 的子级」→ 判 subsection（仿宋）。
+旧名 h1/h2/h3/h4 仍可接收（format.py 内部自动别名映射）。
 
 字体依赖: 需安装方正小标宋/黑体/楷体/仿宋_GBK, 否则 Word 会提示字体缺失。
 """
@@ -43,40 +49,121 @@ from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 排版参数
+# 排版参数（可通过 .docx-helper.json 配置覆盖）
 # ══════════════════════════════════════════════════════════════════════════════
 
-MARGINS = dict(top=Cm(3.7), bottom=Cm(3.5), left=Cm(2.7), right=Cm(2.7))
-FOOTER_DIST = Cm(2.54)
-LINE_SPACING = Pt(28.9)
 BLACK = RGBColor(0, 0, 0)
 
+# ── 运行时变量（由 _apply_config 设置，不要直接硬编码） ──
 FONT_TITLE = '方正小标宋_GBK'
-FONT_H1    = '方正黑体_GBK'
-FONT_H2    = '方正楷体_GBK'
-FONT_H3    = '方正仿宋_GBK'    # 三级标题用仿宋
-FONT_H4    = '方正仿宋_GBK'    # 四级标题用仿宋
-FONT_BODY  = '方正仿宋_GBK'
-FONT_EN    = 'Times New Roman'
+FONT_CHAPTER = '方正黑体_GBK'
+FONT_SECTION = '方正楷体_GBK'
+FONT_SUBSECTION = '方正仿宋_GBK'
+FONT_ITEM = '方正仿宋_GBK'
+FONT_BODY = '方正仿宋_GBK'
+FONT_EN = 'Times New Roman'
+# 向下兼容别名
+FONT_H1 = FONT_CHAPTER; FONT_H2 = FONT_SECTION; FONT_H3 = FONT_SUBSECTION; FONT_H4 = FONT_ITEM
 
-SIZE_2 = Pt(22)  # 二号
-SIZE_3 = Pt(16)  # 三号
-SIZE_4 = Pt(14)  # 四号
+SIZE_TITLE = Pt(22)
+SIZE_CHAPTER = Pt(16)
+SIZE_SECTION = Pt(16)
+SIZE_SUBSECTION = Pt(16)
+SIZE_ITEM = Pt(16)
+SIZE_BODY = Pt(16)
+SIZE_PAGE = Pt(14)
+SIZE_2 = SIZE_TITLE; SIZE_3 = SIZE_BODY; SIZE_4 = SIZE_PAGE
 
-# 类型元数据: (label, cn_font, en_font, size, alignment)
-TYPE_META = {
-    'title':  ('大标题',   FONT_TITLE, SIZE_2, 'center'),
-    'h1':     ('一级标题', FONT_H1,    SIZE_3, 'left'),
-    'h2':     ('二级标题', FONT_H2,    SIZE_3, 'left'),
-    'h3':     ('三级标题', FONT_H3,    SIZE_3, 'left'),
-    'h4':     ('四级标题', FONT_H4,    SIZE_3, 'left'),
-    'bullet': ('项目符号', FONT_BODY,  SIZE_3, 'left'),
-    'body':   ('正文',     FONT_BODY,  SIZE_3, 'left'),
+MARGINS = {}
+FOOTER_DIST = Cm(2.54)
+LINE_SPACING = Pt(28.9)
+BODY_INDENT_CHARS = 2
+PAGE_NUMBER_FORMAT = '\u2014 N \u2014'
+
+# ── 默认配置（GB/T 9704-2012 规范） ──
+DEFAULT_CONFIG = {
+    "page": {"margins": {"top": "3.7cm", "bottom": "3.5cm", "left": "2.7cm", "right": "2.7cm"}, "footer_distance": "2.54cm"},
+    "fonts": {"title": "方正小标宋_GBK", "chapter": "方正黑体_GBK", "section": "方正楷体_GBK", "subsection": "方正仿宋_GBK", "item": "方正仿宋_GBK", "body": "方正仿宋_GBK", "en": "Times New Roman"},
+    "sizes": {"title": 22, "chapter": 16, "section": 16, "subsection": 16, "item": 16, "body": 16, "page_number": 14},
+    "spacing": {"line_height": 28.9, "body_indent_chars": 2},
+    "page_number_format": "\u2014 N \u2014",
 }
+
+def _parse_cm(val):
+    if isinstance(val, (int, float)): return Cm(float(val))
+    s = str(val).strip()
+    if s.endswith('mm'): return Cm(float(s.replace('mm','')) / 10)
+    return Cm(float(s.replace('cm','')))
+
+def _deep_merge(base, override):
+    for k, v in override.items():
+        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+def _apply_config(cfg):
+    global MARGINS, FOOTER_DIST, LINE_SPACING, BODY_INDENT_CHARS, PAGE_NUMBER_FORMAT
+    global FONT_TITLE, FONT_CHAPTER, FONT_SECTION, FONT_SUBSECTION, FONT_ITEM, FONT_BODY, FONT_EN
+    global FONT_H1, FONT_H2, FONT_H3, FONT_H4
+    global SIZE_TITLE, SIZE_CHAPTER, SIZE_SECTION, SIZE_SUBSECTION, SIZE_ITEM, SIZE_BODY, SIZE_PAGE
+    global SIZE_2, SIZE_3, SIZE_4
+    p = cfg.get("page", {}); m = p.get("margins", {})
+    MARGINS = dict(top=_parse_cm(m.get("top","3.7cm")), bottom=_parse_cm(m.get("bottom","3.5cm")),
+                   left=_parse_cm(m.get("left","2.7cm")), right=_parse_cm(m.get("right","2.7cm")))
+    FOOTER_DIST = _parse_cm(p.get("footer_distance", "2.54cm"))
+    f = cfg.get("fonts", {})
+    FONT_TITLE = f.get("title", "方正小标宋_GBK")
+    FONT_CHAPTER = f.get("chapter", "方正黑体_GBK")
+    FONT_SECTION = f.get("section", "方正楷体_GBK")
+    FONT_SUBSECTION = f.get("subsection", "方正仿宋_GBK")
+    FONT_ITEM = f.get("item", "方正仿宋_GBK")
+    FONT_BODY = f.get("body", "方正仿宋_GBK")
+    FONT_EN = f.get("en", "Times New Roman")
+    FONT_H1 = FONT_CHAPTER; FONT_H2 = FONT_SECTION; FONT_H3 = FONT_SUBSECTION; FONT_H4 = FONT_ITEM
+    s = cfg.get("sizes", {})
+    SIZE_TITLE = Pt(s.get("title", 22)); SIZE_CHAPTER = Pt(s.get("chapter", 16))
+    SIZE_SECTION = Pt(s.get("section", 16)); SIZE_SUBSECTION = Pt(s.get("subsection", 16))
+    SIZE_ITEM = Pt(s.get("item", 16)); SIZE_BODY = Pt(s.get("body", 16))
+    SIZE_PAGE = Pt(s.get("page_number", 14))
+    SIZE_2 = SIZE_TITLE; SIZE_3 = SIZE_BODY; SIZE_4 = SIZE_PAGE
+    sp = cfg.get("spacing", {})
+    LINE_SPACING = Pt(sp.get("line_height", 28.9))
+    BODY_INDENT_CHARS = sp.get("body_indent_chars", 2)
+    PAGE_NUMBER_FORMAT = cfg.get("page_number_format", "\u2014 N \u2014")
+    _rebuild_type_meta()
+
+def load_config(path=None):
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    if path and os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as fh:
+            _deep_merge(cfg, json.load(fh))
+    _apply_config(cfg)
+    return cfg
+
+TYPE_META = {}
+
+def _rebuild_type_meta():
+    TYPE_META.clear()
+    TYPE_META.update({
+        'title': ('大标题', FONT_TITLE, SIZE_TITLE, 'center'),
+        'chapter': ('章标题', FONT_CHAPTER, SIZE_CHAPTER, 'left'),
+        'section': ('节标题', FONT_SECTION, SIZE_SECTION, 'left'),
+        'subsection': ('子节标题', FONT_SUBSECTION, SIZE_SUBSECTION, 'left'),
+        'item': ('条目编号', FONT_ITEM, SIZE_ITEM, 'left'),
+        'bullet': ('项目符号', FONT_BODY, SIZE_BODY, 'left'),
+        'body': ('正文', FONT_BODY, SIZE_BODY, 'left'),
+        'h1': ('一级标题', FONT_CHAPTER, SIZE_CHAPTER, 'left'),
+        'h2': ('二级标题', FONT_SECTION, SIZE_SECTION, 'left'),
+        'h3': ('三级标题', FONT_SUBSECTION, SIZE_SUBSECTION, 'left'),
+        'h4': ('四级标题', FONT_ITEM, SIZE_ITEM, 'left'),
+    })
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 辅助函数
 # ══════════════════════════════════════════════════════════════════════════════
+
+_apply_config(DEFAULT_CONFIG)  # 模块导入时初始化所有排版常量
 
 def _set_font(run, cn_font, en_font, size):
     """设置 run 的字体、字号，确保不加粗、颜色为黑色"""
@@ -100,21 +187,48 @@ def _set_spacing(para, space_before=0, space_after=0):
 
 
 def _add_page_numbers(section):
-    """在默认页脚添加 "— PAGE —" 格式页码 (4号 Times New Roman, 居中)"""
-    footer = section.footer
-    footer.is_linked_to_previous = False
-    for p in footer.paragraphs:
+    """在页脚添加页码：奇数页右下、偶数页左下，格式由 PAGE_NUMBER_FORMAT 配置。"""
+    # 启用奇偶页不同页脚
+    from docx.oxml import OxmlElement
+    evenAndOddHeaders = OxmlElement('w:evenAndOddHeaders')
+    section._sectPr.append(evenAndOddHeaders)
+
+    # 奇数页页脚（默认）：右对齐
+    odd_footer = section.footer
+    odd_footer.is_linked_to_previous = False
+    for p in odd_footer.paragraphs:
         p.clear()
-    p = footer.paragraphs[0]
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _add_page_run(p, '\u2014 ')
-    _add_page_field(p)
-    _add_page_run(p, ' \u2014')
+    p_odd = odd_footer.paragraphs[0]
+    p_odd.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _build_page_run(p_odd)
+
+    # 偶数页页脚：左对齐
+    even_footer = section.even_page_footer
+    even_footer.is_linked_to_previous = False
+    for p in even_footer.paragraphs:
+        p.clear()
+    p_even = even_footer.paragraphs[0]
+    p_even.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _build_page_run(p_even)
+
+def _build_page_run(para):
+    fmt = PAGE_NUMBER_FORMAT
+    parts = fmt.split('N', 1)
+    if len(parts) == 2:
+        if parts[0]:
+            _add_page_run(para, parts[0])
+        _add_page_field(para)
+        if parts[1]:
+            _add_page_run(para, parts[1])
+    else:
+        _add_page_run(para, '\u2014 ')
+        _add_page_field(para)
+        _add_page_run(para, ' \u2014')
 
 
 def _add_page_run(para, text):
     run = para.add_run(text)
-    run.font.size = SIZE_4
+    run.font.size = SIZE_PAGE
     run.bold = False
     rPr = run._element.get_or_add_rPr()
     rFonts = parse_xml(f'<w:rFonts {nsdecls("w")} w:eastAsia="{FONT_EN}" w:ascii="{FONT_EN}" w:hAnsi="{FONT_EN}"/>')
@@ -136,18 +250,18 @@ def _add_page_field(para):
 
 def _next_version(input_path):
     base = os.path.splitext(os.path.basename(input_path))[0]
-    m = re.match(r'^(.+?)\+gov-style\+v(\d+)$', base)
+    m = re.match(r'^(.+?)\+docx-helper\+v(\d+)$', base)
     if m:
         base = m.group(1)
     dirname = os.path.dirname(input_path) or '.'
-    pattern = os.path.join(dirname, f'{base}+gov-style+v*.docx')
+    pattern = os.path.join(dirname, f'{base}+docx-helper+v*.docx')
     existing = glob.glob(pattern)
     max_v = 0
     for f in existing:
-        m2 = re.search(r'\+gov-style\+v(\d+)\.docx$', f)
+        m2 = re.search(r'\+docx-helper\+v(\d+)\.docx$', f)
         if m2:
             max_v = max(max_v, int(m2.group(1)))
-    return base, max_v + 1, os.path.join(dirname, f'{base}+gov-style+v{max_v + 1}.docx')
+    return base, max_v + 1, os.path.join(dirname, f'{base}+docx-helper+v{max_v + 1}.docx')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,27 +360,314 @@ def _find_title_idx(paragraphs):
     return -1
 
 
-# 编号检测返回的类型中，h3_multi 和 chapter 需要映射到现有 TYPE_META
+# 编号检测返回的类型中，h3_multi / chapter / h5 需要映射到现有 TYPE_META
+# 同时提供新旧别名：chapter=h1, section=h2, subsection=h3, item=h4
 _TYPE_ALIAS = {
     'h3_multi': 'h3',
     'chapter': 'h1',
     'h5': 'h4',
+    # 新名 → 旧名（统一收敛到 formatter）
+    'chapter':    'h1',
+    'section':    'h2',
+    'subsection': 'h3',
+    'item':       'h4',
 }
 
 def _resolve_type(ptype):
     return _TYPE_ALIAS.get(ptype, ptype)
-    """找到文档中第一个应该作为大标题的段落索引"""
-    for i, para in enumerate(paragraphs):
-        text = para.text.strip()
-        if not text:
+
+
+def _strip_numpr(para):
+    """移除段落的自动编号（w:numPr），使编号数字由正文文本承载，避免数字与正文字体不一致。"""
+    pPr = para._element.find(qn('w:pPr'))
+    if pPr is not None:
+        numPr = pPr.find(qn('w:numPr'))
+        if numPr is not None:
+            pPr.remove(numPr)
+
+
+def _clear_run_formatting(run):
+    """清空 run 的全部手动格式（字体/字号/颜色/加粗/斜体/下划线/字距等），仅保留文字。"""
+    rPr = run._element.find(qn('w:rPr'))
+    if rPr is not None:
+        for tag in ('w:rFonts', 'w:b', 'w:i', 'w:color', 'w:sz', 'w:u',
+                    'w:highlight', 'w:spacing', 'w:w', 'w:shd', 'w:vertAlign',
+                    'w:rStyle', 'w:strike', 'w:emboss', 'w:imprint', 'w:outline',
+                    'w:dstrike', 'w:effect'):
+            for child in rPr.findall(qn(tag)):
+                rPr.remove(child)
+    run.font.size = None
+    run.bold = None
+    run.italic = None
+    run.underline = None
+    if run.font.color is not None:
+        run.font.color.rgb = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 自动编号 → 文字：reset 时把 Word 自动编号(numPr)烘焙成正文文本，
+# 否则删除 numPr 会把自动生成的序号（1. / 一、 / (1)）一起删掉，层级就丢了。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CN_NUM = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+_CIRCLED = {1: '①', 2: '②', 3: '③', 4: '④', 5: '⑤', 6: '⑥', 7: '⑦', 8: '⑧',
+            9: '⑨', 10: '⑩', 11: '⑪', 12: '⑫', 13: '⑬', 14: '⑭', 15: '⑮',
+            16: '⑯', 17: '⑰', 18: '⑱', 19: '⑲', 20: '⑳'}
+
+def _to_chinese(n):
+    if n <= 10:
+        return _CN_NUM[n]
+    if n < 20:
+        return '十' + (_CN_NUM[n - 10] if n > 10 else '')
+    if n < 100:
+        t, o = divmod(n, 10)
+        return _CN_NUM[t] + '十' + (_CN_NUM[o] if o else '')
+    # 100–999
+    if n < 1000:
+        h, r = divmod(n, 100)
+        result = _CN_NUM[h] + '百'
+        if r == 0:
+            return result
+        if r < 10:
+            return result + '零' + _CN_NUM[r]
+        return result + _to_chinese(r)
+    return str(n)
+
+def _to_roman(n, upper=True):
+    vals = [(1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'), (100, 'C'),
+            (90, 'XC'), (50, 'L'), (40, 'XL'), (10, 'X'), (9, 'IX'),
+            (5, 'V'), (4, 'IV'), (1, 'I')]
+    result = ''
+    for v, r in vals:
+        while n >= v:
+            result += r
+            n -= v
+    return result if upper else result.lower()
+
+def _to_letters(n, upper=True):
+    result = ''
+    while n > 0:
+        n -= 1
+        result = chr(ord('A' if upper else 'a') + n % 26) + result
+        n //= 26
+    return result
+
+def _format_num(n, fmt):
+    if fmt in ('chineseCount', 'chineseNumber', 'ideographTraditional', 'ideographZodiac', 'chineseLegalSimplified'):
+        return _to_chinese(n)
+    if fmt in ('decimalEnclosedCircle', 'decimalEnclosedCircleChinese'):
+        return _CIRCLED.get(n, f'({n})')
+    if fmt == 'decimalFullWidth':
+        return ''.join(chr(ord('０') + int(c)) for c in str(n))
+    if fmt == 'decimalHalfWidth':
+        return ''.join(chr(ord(' ') + int(c)) for c in str(n))
+    if fmt == 'upperRoman':
+        return _to_roman(n, upper=True)
+    if fmt == 'lowerRoman':
+        return _to_roman(n, upper=False)
+    if fmt == 'upperLetter':
+        return _to_letters(n, upper=True)
+    if fmt == 'lowerLetter':
+        return _to_letters(n, upper=False)
+    return str(n)  # decimal 及未知格式回退为阿拉伯数字
+
+def _iter_all_paragraphs(doc):
+    for p in doc.paragraphs:
+        yield p
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    yield p
+
+def _build_numbering_maps(doc):
+    """返回 (numId→abstractNumId, abstractNumId→{ilvl:信息})"""
+    try:
+        numbering_part = doc.part.numbering_part
+    except Exception:
+        return {}, {}
+    if numbering_part is None:
+        return {}, {}
+    root = numbering_part._element
+    num_to_abs = {}
+    lvl_info = {}
+    for num in root.findall(qn('w:num')):
+        nid = num.get(qn('w:numId'))
+        absn = num.find(qn('w:abstractNumId'))
+        if absn is not None:
+            num_to_abs[nid] = absn.get(qn('w:val'))
+    for absn in root.findall(qn('w:abstractNum')):
+        aid = absn.get(qn('w:abstractNumId'))
+        lvl_info[aid] = {}
+        for lvl in absn.findall(qn('w:lvl')):
+            ilvl = int(lvl.get(qn('w:ilvl')))
+            fmt = lvl.find(qn('w:numFmt'))
+            txt = lvl.find(qn('w:lvlText'))
+            start = lvl.find(qn('w:start'))
+            lvl_info[aid][ilvl] = {
+                'fmt': fmt.get(qn('w:val')) if fmt is not None else 'decimal',
+                'text': txt.get(qn('w:val')) if txt is not None else '%1.',
+                'start': int(start.get(qn('w:val'))) if start is not None else 1,
+            }
+    return num_to_abs, lvl_info
+
+def _compute_list_texts(doc):
+    """返回 {段落 lxml 元素: 计算出的编号文本}"""
+    num_to_abs, lvl_info = _build_numbering_maps(doc)
+    if not num_to_abs:
+        return {}
+    result = {}
+    counters = {}      # (numId, ilvl) -> 当前序号
+    seq_decimal = 0    # 顶层十进制 "1." 标题的连续序号
+    prev_meta = None   # (numId, ilvl, fmt) 上一个编号段落
+    parent_chain = []  # 父级链条，用于 %1.%2 嵌套编号
+    for p in _iter_all_paragraphs(doc):
+        numPr = p._element.find(qn('w:pPr'))
+        np = numPr.find(qn('w:numPr')) if numPr is not None else None
+        if np is None:
+            # 非编号段落不重置计数器（正文夹在列表项中间时，编号应延续）
             continue
-        style = para.style.name if para.style else ''
-        if 'Title' in style or '标题' in style:
-            return i
-        if i <= 4 and len(text) <= 80:
-            return i
-        break
-    return -1
+        numId = np.find(qn('w:numId'))
+        ilvl = np.find(qn('w:ilvl'))
+        if numId is None:
+            prev_meta = None
+            continue
+        nid = numId.get(qn('w:val'))
+        il = int(ilvl.get(qn('w:val')) if ilvl is not None else 0)
+        absid = num_to_abs.get(nid)
+        info = lvl_info.get(absid, {}).get(il) if absid is not None else None
+        if info is None:
+            prev_meta = (nid, il, '?')
+            continue
+        fmt = info['fmt']
+        lvltext = info['text']
+        # 顶层十进制 "1." / "1、" 标题：跨独立列表顺次重排（修复"每段都显示 1."的坏源）
+        is_top_decimal = (il == 0 and fmt == 'decimal' and re.match(r'^%1[.、]?$', lvltext))
+        if is_top_decimal:
+            cont = (prev_meta is not None and prev_meta[1] == 0 and prev_meta[2] == 'decimal'
+                    and _numid_gt(nid, prev_meta[0]))
+            seq_decimal = (seq_decimal + 1) if cont else info['start']
+            txt = re.sub(r'%1', _format_num(seq_decimal, fmt), lvltext)
+        else:
+            # 其余（嵌套、括号、(1)、项目符号等）用各自 (numId, ilvl) 计数器
+            if prev_meta is None or prev_meta[0] != nid:
+                for k in list(counters):
+                    if k[0] == nid:
+                        del counters[k]
+                counters[(nid, il)] = info['start']
+            elif il == prev_meta[1]:
+                counters[(nid, il)] = counters.get((nid, il), info['start'] - 1) + 1
+            else:
+                counters[(nid, il)] = counters.get((nid, il), info['start'] - 1) + 1
+            val = counters[(nid, il)]
+            # 维护父级链条以支持 %1.%2 嵌套编号
+            parent_chain = [pc for pc in parent_chain if pc[1] <= il]
+            parent_chain.append((nid, il, val))
+            chain_sorted = sorted(parent_chain, key=lambda x: x[1])
+            def _rep(m, _fmt=fmt):
+                k = int(m.group(1)); idx = k - 1
+                if idx < len(chain_sorted):
+                    return _format_num(chain_sorted[idx][2], _fmt)
+                return ''
+            txt = re.sub(r'%(\d)', _rep, lvltext)
+        if re.search(r'[.、）\)]$', txt):
+            txt += ' '
+        result[p._element] = txt
+        prev_meta = (nid, il, fmt)
+    return result
+
+
+def _numid_gt(a, b):
+    """numId 通常为创建顺序的整数，后建的列表 id 更大"""
+    try:
+        return int(a) > int(b)
+    except ValueError:
+        return a > b
+
+def _convert_list_numbers_to_text(doc):
+    """把自动编号烘焙为正文文本（在段首插入编号 run），并移除 numPr。"""
+    texts = _compute_list_texts(doc)
+    if not texts:
+        return
+    for p in _iter_all_paragraphs(doc):
+        el = p._element
+        if el not in texts:
+            continue
+        num_text = texts[el]
+        cur = p.text.strip()
+        if cur and cur.startswith(num_text.strip()):
+            _strip_numpr(p)
+            continue
+        run = p.add_run(num_text)
+        pPr = el.find(qn('w:pPr'))
+        if pPr is not None:
+            pPr.addnext(run._r)
+        else:
+            el.insert(0, run._r)
+        _strip_numpr(p)
+
+def _reset_para_xml(para, normal_style):
+    """XML 级全量重置段落格式。
+
+    策略：设 pStyle=Normal，然后直接操作 XML 把 w:pPr 下除了 w:pStyle
+    之外的**所有**子元素删除。不做逐个属性置零——python-docx 的 pf.xxx
+    无论设 True/False/0 都会在 XML 里写入显式值，反而会覆盖样式默认值。
+    只保留 pStyle，让 Normal 样式接管一切，才是真正的"归零"。
+
+    处理范围包括（但不限于）：numPr, spacing, ind（含 left/right/firstLine),
+    jc, keepNext, keepLines, pageBreakBefore, widowControl,
+    suppressLineNumbers, snapToGrid, outlineLvl, textDirection,
+    bidi, pBdr, shd, tabs, 以及 beforeAutospacing/afterAutospacing 等
+    python-docx 无 API 的属性。
+    """
+    # 1. 设样式为 Normal
+    if normal_style is not None:
+        try:
+            para.style = normal_style
+        except Exception:
+            pass
+
+    # 2. XML 层面：保留 w:pStyle，删除其他所有 w:pPr 子元素
+    pPr = para._element.find(qn('w:pPr'))
+    if pPr is not None:
+        pStyle_tag = qn('w:pStyle')
+        for child in list(pPr):
+            if child.tag != pStyle_tag:
+                pPr.remove(child)
+
+    # 3. 清空每个 run 的手动格式
+    for r in para.runs:
+        _clear_run_formatting(r)
+
+
+def reset_format(input_path, output_path):
+    """彻底重置文档的所有手动格式，输出了一个中性文档。
+
+    用 XML 级全量清空策略：每个段落只保留 pStyle=Normal，
+    其余所有直接格式（对齐/间距/缩进/分页/自动编号/边框/底纹等）全部删除，
+    让 Normal 样式接管一切。不改变文字内容、段落数量与顺序。
+    """
+    doc = Document(input_path)
+    normal_style = None
+    try:
+        normal_style = doc.styles['Normal']
+    except KeyError:
+        normal_style = None
+
+    # 先把自动编号转成文字（之后 nuke pPr 时会一并清掉 numPr，序号已安全转存）
+    _convert_list_numbers_to_text(doc)
+
+    for para in doc.paragraphs:
+        _reset_para_xml(para, normal_style)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _reset_para_xml(para, normal_style)
+
+    doc.save(output_path)
+    return output_path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -931,62 +1332,68 @@ def _apply_font_to_runs(para, cn_font, en_font, size):
 
 def format_title(para):
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_spacing(para)
-    _apply_font_to_runs(para, FONT_TITLE, FONT_EN, SIZE_2)
+    _set_spacing(para, space_after=LINE_SPACING)  # 大标题下方空 1 行
+    _apply_font_to_runs(para, FONT_TITLE, FONT_EN, SIZE_TITLE)
 
 
 def format_h1(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H1, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_CHAPTER, FONT_EN, SIZE_CHAPTER)
 
 
 def format_h2(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H2, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_SECTION, FONT_EN, SIZE_SECTION)
 
 
 def format_h3(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H3, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_SUBSECTION, FONT_EN, SIZE_SUBSECTION)
 
 
 def format_h4(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_H4, FONT_EN, SIZE_3)
+    para.paragraph_format.first_line_indent = Pt(int(SIZE_BODY.pt * BODY_INDENT_CHARS))
+    _apply_font_to_runs(para, FONT_ITEM, FONT_EN, SIZE_ITEM)
 
 
 def format_bullet(para):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
-    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
 
 
 def format_body(para, indent=True):
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     _set_spacing(para)
     if indent:
-        para.paragraph_format.first_line_indent = Pt(32)
+        para.paragraph_format.first_line_indent = Pt(int(SIZE_BODY.pt * BODY_INDENT_CHARS))
     else:
         para.paragraph_format.first_line_indent = Pt(0)
-    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_3)
+    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
 
 
 _FORMATTERS = {
-    'title':  format_title,
-    'h1':     format_h1,
-    'h2':     format_h2,
-    'h3':     format_h3,
-    'h4':     format_h4,
-    'bullet': format_bullet,
-    'body':   format_body,
+    'title':      format_title,
+    'chapter':    format_h1,
+    'section':    format_h2,
+    'subsection': format_h3,
+    'item':       format_h4,
+    'bullet':     format_bullet,
+    'body':       format_body,
+    # 旧名兼容
+    'h1': format_h1,
+    'h2': format_h2,
+    'h3': format_h3,
+    'h4': format_h4,
 }
 
 
-def apply_format(input_path, output_path, overrides=None):
+def apply_format(input_path, output_path, overrides=None, structure=None):
     doc = Document(input_path)
 
     # 页面
@@ -1000,19 +1407,31 @@ def apply_format(input_path, output_path, overrides=None):
         sec.page_height = Cm(29.7)
         _add_page_numbers(sec)
 
+    # 结构映射（来自大模型判定的 structure.json）
+    # structure: {"paragraphs": {idx: type}, "cover": bool|None, "title_index": int|None}
+    type_map = {}
+    if structure and isinstance(structure.get('paragraphs'), dict):
+        type_map = {int(k): v for k, v in structure['paragraphs'].items()}
+    cover_flag = structure.get('cover') if structure else None     # True/False/None
+    title_index = structure.get('title_index') if structure else None
+
+    # 兼容旧版 overrides（手动覆盖规则，优先级高于 structure）
     para_overrides = {}
     if overrides and 'paragraphs' in overrides:
         para_overrides = {int(k): v for k, v in overrides['paragraphs'].items()}
 
-    cover_overrides = overrides.get('cover') if overrides else None
     paragraphs = doc.paragraphs
 
     # ── 封面检测与排版 ──
-    cover_info = _detect_cover(paragraphs)
-    if cover_info and cover_overrides is not False:
-        _format_cover(doc, cover_info)
+    cover_info = None
+    if cover_flag is not False:
+        cover_info = _detect_cover(paragraphs)
+        if cover_info and cover_flag is not False:
+            _format_cover(doc, cover_info)
 
-    title_idx = _find_title_idx(paragraphs)
+    # 没有 structure 时，回退到启发式标题检测（兼容老流程）
+    if title_index is None and not type_map:
+        title_index = _find_title_idx(paragraphs)
 
     for i, para in enumerate(paragraphs):
         if not para.text.strip():
@@ -1025,13 +1444,18 @@ def apply_format(input_path, output_path, overrides=None):
                                 + cover_info.get('date_indices', [])):
             continue
 
+        # 类型判定优先级：overrides > structure 映射 > 启发式
         if i in para_overrides:
             ptype = para_overrides[i]
+        elif i in type_map:
+            ptype = type_map[i]
         else:
             ptype, _, _ = _classify(para)
+            if title_index is not None and i == title_index and ptype not in ('title', 'h1', 'h2', 'h3'):
+                ptype = 'title'
 
-        if i == title_idx and i not in para_overrides and ptype not in ('title', 'h1', 'h2', 'h3'):
-            ptype = 'title'
+        # 套用前强制清除自动编号，避免数字与正文字体不一致
+        _strip_numpr(para)
 
         formatter = _FORMATTERS.get(ptype, format_body)
         formatter(para)
@@ -1042,10 +1466,82 @@ def apply_format(input_path, output_path, overrides=None):
             for cell in row.cells:
                 for para in cell.paragraphs:
                     if para.text.strip():
+                        _strip_numpr(para)
                         format_body(para, indent=False)
 
     doc.save(output_path)
     return output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 自动结构检测（P2）：扫描编号模式，推断层级，生成 structure.json 初稿
+# ══════════════════════════════════════════════════════════════════════════════
+
+def auto_detect_structure(doc_path):
+    """扫描 reset 文档，按编号模式自动推断层级。
+
+    核心规则（覆盖 GB 文档和混合编号文档）：
+    - 一、二、…   → chapter（章）
+    - 如果文档使用了「（一）」→ 1. 降为 subsection；否则 1. / 2.1 均为 section
+    - x.y.z       → subsection（子节）
+    - （1）①      → item（条目）
+    - ·●◆         → bullet（项目符号）
+    - 其余         → body（正文）
+
+    返回 structure dict，可直接喂给 --structure。
+    """
+    doc = Document(doc_path)
+    paragraphs = doc.paragraphs
+
+    # 先探测文档是否使用了 GB 括号中文编号（影响 1. 的层级判定）
+    has_chinese_paren_section = False
+    for p in paragraphs:
+        if re.match(r'^（[一二三四五六七八九十]+）', p.text.strip()):
+            has_chinese_paren_section = True
+            break
+
+    type_map = {}
+    for i, p in enumerate(paragraphs):
+        text = p.text.strip()
+        if not text:
+            continue
+        ptype = _auto_classify(text, has_chinese_paren_section)
+        if ptype:
+            type_map[str(i)] = ptype
+
+    cover_info = _detect_cover(paragraphs)
+    title_idx = _find_title_idx(paragraphs)
+
+    return {
+        "paragraphs": type_map,
+        "cover": cover_info is not None,
+        "title_index": title_idx if title_idx >= 0 else None,
+    }
+
+def _auto_classify(text, has_chinese_paren=False):
+    """自动分类单段文本；has_chinese_paren 影响 1. 是 section 还是 subsection。"""
+    # 章
+    if re.match(r'^[一二三四五六七八九十]+[、]', text):
+        return 'chapter'
+    # 子节：x.y.z
+    if re.match(r'^\d+\.\d+\.\d+', text):
+        return 'subsection'
+    # 节：x.y（两层）
+    if re.match(r'^\d+\.\d+\s', text) or re.match(r'^\d+\.\d+[、]', text):
+        return 'section'
+    # 节：单层数字（若文档有（一）则降为 subsection）
+    if re.match(r'^\d+[\.、]', text):
+        return 'subsection' if has_chinese_paren else 'section'
+    # GB 括号中文
+    if re.match(r'^（[一二三四五六七八九十]+）', text):
+        return 'section'
+    # 条目
+    if re.match(r'^\(\d+\)', text) or re.match(r'^[①-⑩]', text):
+        return 'item'
+    # 项目符号
+    if re.match(r'^[·•●◆★■▶▪○□△▷◇♦☞✓✔]', text):
+        return 'bullet'
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1055,13 +1551,18 @@ def apply_format(input_path, output_path, overrides=None):
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='公文格式刷')
+    parser = argparse.ArgumentParser(description='文档排版助手 docx-helper')
     parser.add_argument('input', nargs='?', help='输入 .docx 文件')
-    parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件')
+    parser.add_argument('--reset', action='store_true', help='重置模式：清空所有手动格式，输出 {原名}+reset.docx（中性文档，便于判结构）')
+    parser.add_argument('--list', action='store_true', help='列出文档所有非空段落的「索引: 文本」，用于判结构')
+    parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件（启发式，仅供参考）')
     parser.add_argument('--apply', action='store_true', help='应用模式：执行排版并输出版本化文件')
+    parser.add_argument('--structure', help='结构映射 JSON 文件路径（大模型判定的段落类型）')
+    parser.add_argument('--auto', action='store_true', help='自动检测编号体系生成 structure.json（跳过 LLM 判结构，覆盖 ~80% 标准文档）')
+    parser.add_argument('--config', help='排版配置文件路径（.docx-helper.json，默认查找当前目录或 ~/.workbuddy）')
     parser.add_argument('--version', type=int, help='指定版本号（默认自动递增）')
     parser.add_argument('--output', help='直接指定输出路径（跳过版本号逻辑）')
-    parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径')
+    parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径（旧版，优先级高于 structure）')
 
     args = parser.parse_args()
 
@@ -1073,6 +1574,52 @@ if __name__ == '__main__':
     if not os.path.exists(src):
         print(f'错误: 找不到 {src}')
         sys.exit(1)
+
+    # 加载配置文件（优先级：--config > ./.docx-helper.json > ~/.workbuddy/docx-helper.json）
+    config_path = args.config
+    if not config_path:
+        for candidate in [os.path.join(os.getcwd(), '.docx-helper.json'),
+                          os.path.join(os.path.expanduser('~'), '.workbuddy', 'docx-helper.json')]:
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+    if config_path:
+        print(f'配置: {config_path}')
+        load_config(config_path)
+    else:
+        _apply_config(DEFAULT_CONFIG)  # 确保 MARGINS/TYPE_META 等被正确初始化
+
+    if args.auto:
+        # 自动检测编号体系
+        auto_struct = auto_detect_structure(src)
+        if not args.apply:
+            # --auto 单独使用：输出 structure.json
+            if args.output:
+                with open(args.output, 'w', encoding='utf-8') as f:
+                    json.dump(auto_struct, f, ensure_ascii=False, indent=2)
+                print(f'结构已保存: {args.output}')
+            else:
+                out = json.dumps(auto_struct, ensure_ascii=False, indent=2)
+                if hasattr(sys.stdout, 'reconfigure'):
+                    sys.stdout.reconfigure(encoding='utf-8')
+                print(out)
+            sys.exit(0)
+
+    if args.list:
+        doc = Document(src)
+        for i, para in enumerate(doc.paragraphs):
+            text = para.text.strip()
+            if text:
+                print(f'{i}: {text}')
+        sys.exit(0)
+
+    if args.reset:
+        base = os.path.splitext(os.path.basename(src))[0]
+        dirname = os.path.dirname(src) or '.'
+        dst = args.output or os.path.join(dirname, f'{base}+reset.docx')
+        result = reset_format(src, dst)
+        print(f'重置完成: {result}')
+        sys.exit(0)
 
     if args.analyze:
         report = analyze(src)
@@ -1089,13 +1636,22 @@ if __name__ == '__main__':
         if args.version:
             version = args.version
             dirname = os.path.dirname(src) or '.'
-            dst = os.path.join(dirname, f'{base}+gov-style+v{version}.docx')
+            dst = os.path.join(dirname, f'{base}+docx-helper+v{version}.docx')
         print(f'版本: v{version}')
+
+    structure = None
+    # --structure 优先于 --auto
+    if args.structure and os.path.exists(args.structure):
+        with open(args.structure, 'r', encoding='utf-8') as f:
+            structure = json.load(f)
+    elif args.auto:
+        structure = auto_detect_structure(src)
+        print(f'自动检测: {len(structure["paragraphs"])} 个段落已分类')
 
     overrides = None
     if args.overrides and os.path.exists(args.overrides):
         with open(args.overrides, 'r', encoding='utf-8') as f:
             overrides = json.load(f)
 
-    result = apply_format(src, dst, overrides)
+    result = apply_format(src, dst, overrides, structure)
     print(f'完成: {result}')
