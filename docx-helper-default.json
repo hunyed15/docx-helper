@@ -30,5 +30,8 @@
     "line_height": 28.9,
     "body_indent_chars": 2
   },
-  "page_number_format": "— N —"
+  "page_number_format": "— N —",
+  "typo_rules": {
+    "_comment": "用户自定义错别字库（合并到内置库），格式：{\"错误写法\": \"正确写法\"}。示例：\"部署\": \"布署\""
+  }
 }
