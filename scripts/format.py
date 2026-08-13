@@ -31,7 +31,7 @@
   6. item      (条目编号):  3号 方正仿宋_GBK, 左对齐, 无缩进
   7. bullet    (项目符号):  3号 方正仿宋_GBK, 左对齐
   8. body      (正文):      3号 方正仿宋_GBK, 首行缩进 2 字, 行距 28.9 磅
-  9. 页码: 4号 Times New Roman, "— N —" 格式, 居中
+  9. 页码: 4号 Times New Roman, "— N —" 格式, 奇数页右下、偶数页左下（evenAndOddHeaders）
 
 注意：标题层级判定应按语义深度（relative depth），而非按编号字符正则匹配。
 例：1.编制背景 和 2.1 盘点目标 同为「章的直接子级」→ 均判 section（楷体）；4.1.1 按分层迁移 是「h2 的子级」→ 判 subsection（仿宋）。
@@ -43,7 +43,7 @@
 import glob, itertools, json, os, re, sys
 from collections import defaultdict, Counter
 from docx import Document
-from docx.shared import Pt, Cm, RGBColor
+from docx.shared import Pt, Cm, RGBColor, Twips
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
@@ -87,7 +87,39 @@ DEFAULT_CONFIG = {
     "sizes": {"title": 22, "chapter": 16, "section": 16, "subsection": 16, "item": 16, "body": 16, "page_number": 14},
     "spacing": {"line_height": 28.9, "body_indent_chars": 2},
     "page_number_format": "\u2014 N \u2014",
+    "typo_rules": {},
 }
+
+# 常见错别字/叠词库（从实战文档中沉淀）
+TYPO_PATTERNS = [
+    ('一但', '一旦'),
+    ('防范未然', '防患未然'),
+    ('任意任意', '任意'),
+    ('日常日常', '日常'),
+    ('的的', '的'),
+    ('了了', '了'),
+    ('平台平台', '平台'),
+    ('数据数据', '数据'),
+    ('系统系统', '系统'),
+    ('服务服务', '服务'),
+]
+
+# 用户可扩展错别字库（通过 .docx-helper.json 的 typo_rules 配置，合并到内置库）
+USER_TYPO_PATTERNS = []
+
+
+def _load_user_typo_rules(cfg=None):
+    """从配置加载用户自定义错别字规则，格式：{"typo_rules": {"错误写法": "正确写法"}}"""
+    global USER_TYPO_PATTERNS
+    if cfg is None:
+        cfg = DEFAULT_CONFIG
+    rules = cfg.get('typo_rules', {}) or {}
+    USER_TYPO_PATTERNS = [(k, v) for k, v in rules.items() if k != v]
+    return USER_TYPO_PATTERNS
+
+
+def _all_typo_patterns():
+    return TYPO_PATTERNS + USER_TYPO_PATTERNS
 
 def _parse_cm(val):
     if isinstance(val, (int, float)): return Cm(float(val))
@@ -132,6 +164,7 @@ def _apply_config(cfg):
     BODY_INDENT_CHARS = sp.get("body_indent_chars", 2)
     PAGE_NUMBER_FORMAT = cfg.get("page_number_format", "\u2014 N \u2014")
     _rebuild_type_meta()
+    _load_user_typo_rules(cfg)
 
 def load_config(path=None):
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -153,6 +186,8 @@ def _rebuild_type_meta():
         'item': ('条目编号', FONT_ITEM, SIZE_ITEM, 'left'),
         'bullet': ('项目符号', FONT_BODY, SIZE_BODY, 'left'),
         'body': ('正文', FONT_BODY, SIZE_BODY, 'left'),
+        'signature': ('落款', FONT_BODY, SIZE_BODY, 'left'),
+        'caption': ('图题表题', FONT_CHAPTER, SIZE_BODY, 'center'),
         'h1': ('一级标题', FONT_CHAPTER, SIZE_CHAPTER, 'left'),
         'h2': ('二级标题', FONT_SECTION, SIZE_SECTION, 'left'),
         'h3': ('三级标题', FONT_SUBSECTION, SIZE_SUBSECTION, 'left'),
@@ -340,6 +375,11 @@ def _classify(para):
             return 'h4', 'high', result
         if ptype == 'h3_multi':
             return 'h3', 'high', result
+        # 关键改进：数字编号（1. / 1、）后跟长正文时判为正文而非标题
+        # 「1. 巡检人员应于一天内完成当次巡检任务并填写巡检表…」这类是正文条款，
+        # 不是三级标题。判断依据：编号后剩余文字 > 30 字符（接近整段正文）
+        if ptype in ('h2', 'h3', 'item') and len(rest) > 30:
+            return 'body', 'high', result
         return ptype, 'high', result
 
     return 'body', 'high', None
@@ -453,7 +493,8 @@ def _to_letters(n, upper=True):
     return result
 
 def _format_num(n, fmt):
-    if fmt in ('chineseCount', 'chineseNumber', 'ideographTraditional', 'ideographZodiac', 'chineseLegalSimplified'):
+    if fmt in ('chineseCount', 'chineseCounting', 'chineseNumber', 'ideographTraditional',
+               'ideographZodiac', 'chineseLegalSimplified', 'japaneseCounting', 'japaneseLegal'):
         return _to_chinese(n)
     if fmt in ('decimalEnclosedCircle', 'decimalEnclosedCircleChinese'):
         return _CIRCLED.get(n, f'({n})')
@@ -545,7 +586,7 @@ def _compute_list_texts(doc):
         is_top_decimal = (il == 0 and fmt == 'decimal' and re.match(r'^%1[.、]?$', lvltext))
         if is_top_decimal:
             cont = (prev_meta is not None and prev_meta[1] == 0 and prev_meta[2] == 'decimal'
-                    and _numid_gt(nid, prev_meta[0]))
+                    and _numid_ge(nid, prev_meta[0]))
             seq_decimal = (seq_decimal + 1) if cont else info['start']
             txt = re.sub(r'%1', _format_num(seq_decimal, fmt), lvltext)
         else:
@@ -575,6 +616,16 @@ def _compute_list_texts(doc):
         result[p._element] = txt
         prev_meta = (nid, il, fmt)
     return result
+
+
+def _numid_ge(a, b):
+    """numId 通常为创建顺序的整数；同一列表内后续段落的 numId 相同，
+    不同列表通常 numId 更大。所以「不小于」视为延续同一序列，
+    「小于」视为新列表重置。"""
+    try:
+        return int(a) >= int(b)
+    except ValueError:
+        return a >= b
 
 
 def _numid_gt(a, b):
@@ -638,6 +689,52 @@ def _reset_para_xml(para, normal_style):
     # 3. 清空每个 run 的手动格式
     for r in para.runs:
         _clear_run_formatting(r)
+
+
+# 模板版本号（更新 assets/规范文档模板.docx 时同步递增）
+TEMPLATE_VERSION = '2.0'
+
+
+def new_document_from_template(output_path, title=None, template=None):
+    """从内置规范模板创建新文档（治本方案——新文档直接用模板，无需排版）。
+
+    模板路径优先级：
+    1. 显式指定 template
+    2. 技能目录 assets/规范文档模板.docx
+    3. ~/.workbuddy/skills/docx-helper/assets/规范文档模板.docx
+
+    可选 title：若提供，替换文档封面与正文标题中的占位符「××××××规范」前一段
+    （即主标题第二行），实际替换「××××××」为 title。
+    """
+    import shutil
+    candidates = []
+    if template:
+        candidates.append(template)
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(skill_dir, 'assets', '规范文档模板.docx'))
+    candidates.append(os.path.join(os.path.expanduser('~'), '.workbuddy', 'skills',
+                                   'docx-helper', 'assets', '规范文档模板.docx'))
+    tpl = None
+    for c in candidates:
+        if c and os.path.exists(c):
+            tpl = c
+            break
+    if tpl is None:
+        raise FileNotFoundError('未找到规范文档模板（assets/规范文档模板.docx）')
+
+    shutil.copy(tpl, output_path)
+    if title:
+        doc = Document(output_path)
+        # 只替换两个标题段落（封面副标题 + 正文大标题），不碰示例内容
+        # 封面副标题：纯「××××××规范」；正文大标题：含「××××××规范」且位于封面后的主标题
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if t == '××××××规范' or (t.endswith('××××××规范') and t.startswith('××')):
+                for r in p.runs:
+                    if '××××××' in r.text:
+                        r.text = r.text.replace('××××××', title)
+        doc.save(output_path)
+    return output_path
 
 
 def reset_format(input_path, output_path):
@@ -1377,6 +1474,28 @@ def format_body(para, indent=True):
     _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
 
 
+# 落款（签名/日期）默认左缩进 twips，保证相邻落款行"首字"竖直对齐
+SIGNATURE_LEFT_INDENT_TWIPS = 3700
+
+
+def format_signature(para):
+    """落款行：左对齐 + 固定左缩进（右空约四字），用于巡检人/巡检日期/签名/日期等。
+    多行落款用相同左缩进 → 首字（如"巡"）从同一 x 坐标开始，天然竖直对齐。"""
+    para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_spacing(para)
+    para.paragraph_format.first_line_indent = Pt(0)
+    para.paragraph_format.left_indent = Twips(SIGNATURE_LEFT_INDENT_TWIPS)
+    _apply_font_to_runs(para, FONT_BODY, FONT_EN, SIZE_BODY)
+
+
+def format_caption(para):
+    """图题/表题：黑体三号居中（参考 GB/T 7713.2-2022：图题图下居中、表题表上居中）"""
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_spacing(para)
+    para.paragraph_format.first_line_indent = Pt(0)
+    _apply_font_to_runs(para, FONT_CHAPTER, FONT_EN, SIZE_BODY)
+
+
 _FORMATTERS = {
     'title':      format_title,
     'chapter':    format_h1,
@@ -1385,6 +1504,8 @@ _FORMATTERS = {
     'item':       format_h4,
     'bullet':     format_bullet,
     'body':       format_body,
+    'signature':  format_signature,
+    'caption':    format_caption,
     # 旧名兼容
     'h1': format_h1,
     'h2': format_h2,
@@ -1469,8 +1590,147 @@ def apply_format(input_path, output_path, overrides=None, structure=None):
                         _strip_numpr(para)
                         format_body(para, indent=False)
 
+    # 图片修复：浮动 anchor → 嵌入 inline（避免图文错位）
+    _fix_floating_images(doc)
+
     doc.save(output_path)
     return output_path
+
+
+def _fix_floating_images(doc):
+    """修复浮动图片导致的图文错位。
+
+    问题：`<wp:anchor behindDoc="1">` + `wrapThrough`（文字穿越环绕）时，
+    正文会从图片上穿过，产生图文重叠错位（应急预案组织架构图踩坑）。
+
+    方案：把 wp:anchor 转为 wp:inline（嵌入型），删除定位/环绕子元素与属性，
+    图片独立成行，正文自然避让；图片所在段落设为居中。
+
+    覆盖范围：正文段落 + 表格单元格内段落（表格内浮动图片同样需修复）。
+
+    返回修复的图片数。
+    """
+    fixed = 0
+    # 收集所有段落（正文 + 表格内）
+    all_paras = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                all_paras.extend(cell.paragraphs)
+    for p in all_paras:
+        anchors = p._p.findall('.//' + qn('wp:anchor'))
+        if not anchors:
+            continue
+        for anchor in anchors:
+            # 删除 anchor 特有的定位/环绕子元素
+            for tag in ('simplePos', 'positionH', 'positionV', 'wrapThrough', 'wrapPolygon'):
+                for el in anchor.findall(qn('wp:' + tag)):
+                    anchor.remove(el)
+            # 删除 anchor 特有属性，保留 dist*
+            for attr in ('simplePos', 'relativeHeight', 'behindDoc', 'locked',
+                         'layoutInCell', 'allowOverlap'):
+                if attr in anchor.attrib:
+                    del anchor.attrib[attr]
+            anchor.set('distT', '0')
+            anchor.set('distB', '0')
+            anchor.set('distL', '0')
+            anchor.set('distR', '0')
+            # 重命名标签 anchor → inline
+            anchor.tag = qn('wp:inline')
+            fixed += 1
+        # 图片段落居中
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    return fixed
+
+
+def check_content(doc_path):
+    """内容质检：扫描错别字、叠词、编号异常。
+
+    返回 dict：
+    {
+      "typos": [{index, preview, found, suggest}],     # 错别字/叠词
+      "numbering_issues": [{index, preview, issue}],   # 编号重复/跳号/顺序错乱
+    }
+    只读不改，配合排版后人工确认。
+    """
+    doc = Document(doc_path)
+    paras = doc.paragraphs
+    report = {'typos': [], 'numbering_issues': []}
+
+    # 1. 错别字/叠词
+    for i, p in enumerate(paras):
+        t = p.text
+        if not t.strip():
+            continue
+        for old, new in _all_typo_patterns():
+            if old in t:
+                report['typos'].append({
+                    'index': i,
+                    'preview': t[:40],
+                    'found': old,
+                    'suggest': new,
+                })
+        # 通用叠词检测：连续重复的二字词
+        for m in re.finditer(r'([\u4e00-\u9fa5]{2})\1', t):
+            dup = m.group(0)
+            if dup not in [x['found'] for x in report['typos'] if x['index'] == i]:
+                report['typos'].append({
+                    'index': i,
+                    'preview': t[:40],
+                    'found': dup,
+                    'suggest': dup[:2],
+                })
+
+    # 2. 编号异常：检测同级编号重复/跳号
+    # 支持：（1）（2）、1. 2.、一、二、 三种格式，分别独立追踪序列
+    seq_decimal = None   # （1）（2） 或 1. 2. 格式
+    seq_chinese = None   # 一、二、 格式
+    cn_nums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+    for i, p in enumerate(paras):
+        t = p.text.strip()
+        # 阿拉伯数字编号：（1）（2）格式 或 1. 2.格式
+        m = re.match(r'^[（(](\d{1,3})[）)]', t) or re.match(r'^(\d{1,3})[\.、]\s', t)
+        if m:
+            num = int(m.group(1))
+            if seq_decimal is not None:
+                prev_num, prev_idx = seq_decimal
+                if num == prev_num and prev_idx != i:
+                    report['numbering_issues'].append({
+                        'index': i,
+                        'preview': t[:40],
+                        'issue': f'编号 {num} 重复（前一处为段 {prev_idx}）',
+                    })
+                elif num != prev_num + 1 and num != 1:
+                    report['numbering_issues'].append({
+                        'index': i,
+                        'preview': t[:40],
+                        'issue': f'编号 {prev_num} → {num} 跳号（应顺延）',
+                    })
+            seq_decimal = (num, i)
+        # 中文数字编号：一、二、
+        m_cn = re.match(r'^([一二三四五六七八九十])[、]', t)
+        if m_cn:
+            num = cn_nums.get(m_cn.group(1), 0)
+            if num and seq_chinese is not None:
+                prev_num, prev_idx = seq_chinese
+                if num == prev_num and prev_idx != i:
+                    report['numbering_issues'].append({
+                        'index': i,
+                        'preview': t[:40],
+                        'issue': f'编号 {m_cn.group(1)}、 重复（前一处为段 {prev_idx}）',
+                    })
+                elif num != prev_num + 1 and num != 1:
+                    report['numbering_issues'].append({
+                        'index': i,
+                        'preview': t[:40],
+                        'issue': f'编号 {prev_num} → {num}（中文）跳号',
+                    })
+            seq_chinese = (num, i) if num else seq_chinese
+        else:
+            # 非编号段落不重置（列表中间夹正文时编号延续）
+            pass
+
+    return report
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1544,6 +1804,34 @@ def _auto_classify(text, has_chinese_paren=False):
     return None
 
 
+def validate_input(src):
+    """统一输入校验：返回 (ok, 错误消息)。校验扩展名、文件存在、zip 完整性、段落非空。"""
+    if not os.path.exists(src):
+        return False, f'找不到文件: {src}'
+    if not src.lower().endswith('.docx'):
+        return False, f'仅支持 .docx 格式（当前: {os.path.basename(src)}）。旧版 .doc 请先在 Word 中另存为 .docx'
+    try:
+        import zipfile
+        with zipfile.ZipFile(src) as z:
+            bad = z.testzip()
+            if bad is not None:
+                return False, f'文件已损坏（zip 校验失败: {bad}）。请检查文件是否完整'
+            if 'word/document.xml' not in z.namelist():
+                return False, '文件缺少 word/document.xml，可能不是有效的 docx'
+    except zipfile.BadZipFile:
+        return False, f'文件不是有效的 docx（BadZipFile）: {os.path.basename(src)}'
+    except Exception as e:
+        return False, f'文件读取失败: {e}'
+    # 段落非空检查
+    try:
+        doc = Document(src)
+        if len(doc.paragraphs) == 0 and len(doc.tables) == 0:
+            return False, '文档为空（无段落、无表格），无需处理'
+    except Exception as e:
+        return False, f'文档解析失败: {e}'
+    return True, None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1558,21 +1846,40 @@ if __name__ == '__main__':
     parser.add_argument('--analyze', action='store_true', help='分析模式：输出 JSON 差分报告，不修改文件（启发式，仅供参考）')
     parser.add_argument('--apply', action='store_true', help='应用模式：执行排版并输出版本化文件')
     parser.add_argument('--structure', help='结构映射 JSON 文件路径（大模型判定的段落类型）')
-    parser.add_argument('--auto', action='store_true', help='自动检测编号体系生成 structure.json（跳过 LLM 判结构，覆盖 ~80% 标准文档）')
+    parser.add_argument('--auto', action='store_true', help='自动检测编号体系生成 structure.json（跳过 LLM 判结构，覆盖约 8 成标准文档）')
     parser.add_argument('--config', help='排版配置文件路径（.docx-helper.json，默认查找当前目录或 ~/.workbuddy）')
     parser.add_argument('--version', type=int, help='指定版本号（默认自动递增）')
     parser.add_argument('--output', help='直接指定输出路径（跳过版本号逻辑）')
     parser.add_argument('--overrides', help='覆盖规则的 JSON 文件路径（旧版，优先级高于 structure）')
+    parser.add_argument('--fix-images', action='store_true', help='图片修复模式：浮动图片(anchor)转嵌入(inline)，输出 {原名}+fix.docx，不改变其他格式')
+    parser.add_argument('--check-content', action='store_true', help='内容质检模式：扫描错别字/叠词/编号异常，输出 JSON 报告，不修改文件')
+    parser.add_argument('--new', action='store_true', help='新建模式：从内置规范文档模板创建新文档（输出路径取 --output，未指定则用 input 或 新文档.docx；可选 --title 替换标题占位符）')
+    parser.add_argument('--title', help='与 --new 搭配：替换模板中的「××××××」标题占位符')
 
     args = parser.parse_args()
+
+    # --new 模式不需要 input（从模板创建）
+    if args.new:
+        out = args.output or (args.input if args.input else '新文档.docx')
+        try:
+            result = new_document_from_template(out, title=args.title)
+            print(f'已从模板创建新文档: {result}')
+            print(f'模板版本: v{TEMPLATE_VERSION}（assets/规范文档模板.docx）')
+            if args.title:
+                print(f'标题占位符已替换为: {args.title}')
+        except FileNotFoundError as e:
+            print(f'错误: {e}')
+            sys.exit(1)
+        sys.exit(0)
 
     if not args.input:
         parser.print_help()
         sys.exit(0)
 
     src = args.input
-    if not os.path.exists(src):
-        print(f'错误: 找不到 {src}')
+    ok, err = validate_input(src)
+    if not ok:
+        print(f'错误: {err}')
         sys.exit(1)
 
     # 加载配置文件（优先级：--config > ./.docx-helper.json > ~/.workbuddy/docx-helper.json）
@@ -1629,6 +1936,25 @@ if __name__ == '__main__':
         print(output)
         sys.exit(0)
 
+    if args.fix_images:
+        base = os.path.splitext(os.path.basename(src))[0]
+        dirname = os.path.dirname(src) or '.'
+        dst = args.output or os.path.join(dirname, f'{base}+fix.docx')
+        doc = Document(src)
+        n = _fix_floating_images(doc)
+        doc.save(dst)
+        print(f'图片修复: {n} 张浮动图片已转为嵌入型')
+        print(f'输出: {dst}')
+        sys.exit(0)
+
+    if args.check_content:
+        report = check_content(src)
+        output = json.dumps(report, ensure_ascii=False, indent=2)
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
+        print(output)
+        sys.exit(0)
+
     if args.output:
         dst = args.output
     else:
@@ -1655,3 +1981,4 @@ if __name__ == '__main__':
 
     result = apply_format(src, dst, overrides, structure)
     print(f'完成: {result}')
+    print('提示: 排版后建议运行 --check-content 检查错别字/叠词/编号异常')
